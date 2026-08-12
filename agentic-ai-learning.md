@@ -466,6 +466,7 @@ Use this section to track future additions to the notes.
 | 2026-08-09 | Initial version: captured definitions, anatomy, build workflow, optimization, 90-day plan, and references from Consensus research and discussion. |
 | 2026-08-09 | Added "Practical Roadmap: How to Start Building Agents" section with the 7-step start-to-build guide. |
 | 2026-08-09 | Added "Build Log" section and recorded Experiment 1: Simple Math Agent using Ollama and a hand-rolled tool loop. |
+| 2026-08-09 | Added stress test for the math agent; fixed expression normalization for `^` and `!`; achieved 26/26 pass rate. |
 
 ---
 

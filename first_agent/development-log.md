@@ -198,6 +198,56 @@ All previously failing questions now return the correct answer.
 
 ---
 
+## Stress Test Results
+
+A benchmark script (`first_agent/stress_test.py`) was added to measure reliability. The first run used `llama3.1:latest` via Ollama.
+
+### Initial results
+
+```text
+Math questions:       21 / 23 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                 24 / 26 passed (92%)
+Mean response time:    1.49s
+Max response time:     7.60s
+```
+
+### Failures
+
+| Question | Expected | Got | Root Cause |
+|---|---|---|---|
+| What is 2 to the power of 10? | 1024 | 8 | Model generated `2 ^ 10`. In Python `^` is bitwise XOR, not exponentiation. `2 XOR 10` = `8`. |
+| What is factorial of 5? | 120 | syntax error | Model generated `5!`. Python has no `!` factorial operator. |
+
+### Observations
+
+- The two-phase loop is highly consistent: the repetition test passed 5/5 times.
+- The remaining failures are **tool-interface mismatches**, not loop failures. The model produces valid natural-math notation that the Python evaluator does not understand.
+- Non-math questions are handled cleanly because the plan prompt allows direct answers.
+- The guard correctly caught both cases where the answer phase drifted from the tool result, but it returned the raw (wrong) tool result to the user.
+
+### Fix applied
+
+1. **Expression normalization** in the `calculate` tool:
+   - `^` is rewritten to `**` for exponentiation.
+   - `n!` is rewritten to `factorial(n)` (exposed from the `math` module).
+2. **Better prompt examples** added to the plan prompt for powers and factorials.
+3. **Guard improved**: if the tool returns an error, the agent returns a clean error message instead of the raw Python traceback.
+
+### Results after fix
+
+```text
+Math questions:       23 / 23 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                 26 / 26 passed (100%)
+Mean response time:    1.27s
+Max response time:     1.71s
+```
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -225,4 +275,4 @@ All previously failing questions now return the correct answer.
 - Add a second tool (e.g., `read_file` or `get_current_date`) and practice multi-tool selection.
 - Add a reflection phase where a separate prompt verifies the answer before it is returned.
 - Add structured logging so every run produces a JSON trace file for post-hoc analysis.
-- Add a benchmark script that runs a suite of questions and reports correctness.
+- Expand the benchmark script with more edge cases and adversarial prompts.
