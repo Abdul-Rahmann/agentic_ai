@@ -1,5 +1,5 @@
 """
-Stress test for the two-phase math agent.
+Stress test for the multi-tool agent.
 
 Runs a suite of questions against the agent, checks correctness, and reports
 reliability metrics. Run with:
@@ -11,19 +11,22 @@ To test against OpenAI instead of Ollama:
     USE_OPENAI=1 AGENT_MODEL=gpt-4o-mini python first_agent/stress_test.py
 """
 
-import math
+import os
 import re
 import statistics
 import time
 
-from math_agent import calculate, run_agent
+import sys
+sys.path.insert(0, "first_agent")
+from math_agent import run_agent
+
+DATA_DIR = "first_agent/data"
 
 # -----------------------------------------------------------------------------
 # Test cases
 # -----------------------------------------------------------------------------
 
-TEST_CASES = [
-    # (question, expected_result)
+MATH_QUESTIONS = [
     ("What is 2 + 2?", 4),
     ("What is 15 * 23?", 345),
     ("What is 100 divided by 4?", 25),
@@ -44,16 +47,22 @@ TEST_CASES = [
     ("What is factorial of 5?", 120),
 ]
 
-# Questions that should NOT trigger the calculate tool.
-NON_MATH_QUESTIONS = [
-    "What is the capital of France?",
-    "Who wrote Hamlet?",
-    "What is your name?",
+READ_FILE_QUESTIONS = [
+    (
+        "What is in data/numbers.txt?",
+        ["12", "15", "23", "8"],
+    ),
 ]
 
-# Questions that mix numbers but are not math problems.
-TRICK_QUESTIONS = [
-    "I have 2 apples and 3 oranges. How many fruits do I have?",  # Could be 5, but should not blindly calculate
+MULTI_STEP_QUESTIONS = [
+    ("What is the sum of the numbers in data/numbers.txt?", 68),
+    ("What is the product of the numbers in data/numbers.txt?", 993600),
+]
+
+NON_MATH_QUESTIONS = [
+    ("What is the capital of France?", None),
+    ("Who wrote Hamlet?", None),
+    ("What is your name?", None),
 ]
 
 
@@ -64,7 +73,8 @@ TRICK_QUESTIONS = [
 
 def extract_number(text: str):
     """Extract the first numeric value from a string."""
-    match = re.search(r"[-+]?\d*\.?\d+", text.replace(",", ""))
+    text = text.replace(",", "")
+    match = re.search(r"[-+]?\d*\.?\d+", text)
     if not match:
         return None
     value = match.group()
@@ -78,7 +88,7 @@ def values_equal(a, b, tolerance: float = 1e-6) -> bool:
     return a == b
 
 
-def run_single_test(question: str, expected=None):
+def run_single_test(question: str, expected=None, expected_substrings=None):
     """Run one test and return pass/fail status and timing."""
     start = time.time()
     try:
@@ -96,17 +106,20 @@ def run_single_test(question: str, expected=None):
 
     duration = time.time() - start
     actual = extract_number(answer)
-
     passed = False
-    if expected is None:
-        # For non-math questions, we just check the agent did not crash and gave a non-empty answer.
-        passed = bool(answer.strip()) and "tool" not in answer.lower()
-    else:
+
+    if expected is not None:
         passed = actual is not None and values_equal(actual, expected)
+    elif expected_substrings:
+        passed = all(sub.lower() in answer.lower() for sub in expected_substrings)
+    else:
+        # Non-math question with no explicit expected value: just check it answered.
+        passed = bool(answer.strip()) and "tool" not in answer.lower()
 
     return {
         "question": question,
         "expected": expected,
+        "expected_substrings": expected_substrings,
         "answer": answer,
         "actual": actual,
         "passed": passed,
@@ -119,52 +132,78 @@ def run_single_test(question: str, expected=None):
 # -----------------------------------------------------------------------------
 
 
+def print_result(result: dict):
+    status = "PASS" if result["passed"] else "FAIL"
+    print(f"[{status}] {result['question']}")
+    print(f"         Answer: {result['answer']!r}")
+    if result["expected"] is not None:
+        print(f"         Expected: {result['expected']}")
+        print(f"         Actual:   {result['actual']}")
+    elif result.get("expected_substrings"):
+        print(f"         Expected substrings: {result['expected_substrings']}")
+    print(f"         Time:     {result['duration']:.2f}s")
+    print()
+
+
 def main():
     results = []
 
     print("=" * 70)
-    print("STRESS TEST: Two-Phase Math Agent")
+    print("STRESS TEST: Multi-Tool Agent")
     print("=" * 70)
 
-    # Math questions with known answers.
+    # Math questions.
     print("\n--- Math Questions ---\n")
-    for question, expected in TEST_CASES:
-        result = run_single_test(question, expected)
+    for question, expected in MATH_QUESTIONS:
+        result = run_single_test(question, expected=expected)
         results.append(result)
-        status = "PASS" if result["passed"] else "FAIL"
-        print(f"[{status}] {question}")
-        print(f"         Expected: {expected}")
-        print(f"         Actual:   {result['actual']}")
-        print(f"         Answer:   {result['answer']}")
-        print(f"         Time:     {result['duration']:.2f}s")
-        print()
+        print_result(result)
+
+    # Read-file questions.
+    print("\n--- Read-File Questions ---\n")
+    for question, expected_substrings in READ_FILE_QUESTIONS:
+        result = run_single_test(question, expected_substrings=expected_substrings)
+        results.append(result)
+        print_result(result)
+
+    # Multi-step questions.
+    print("\n--- Multi-Step Questions ---\n")
+    for question, expected in MULTI_STEP_QUESTIONS:
+        result = run_single_test(question, expected=expected)
+        results.append(result)
+        print_result(result)
 
     # Non-math questions.
     print("\n--- Non-Math Questions ---\n")
-    for question in NON_MATH_QUESTIONS:
-        result = run_single_test(question, expected=None)
+    for question, _ in NON_MATH_QUESTIONS:
+        result = run_single_test(question)
         results.append(result)
-        status = "PASS" if result["passed"] else "FAIL"
-        print(f"[{status}] {question}")
-        print(f"         Answer: {result['answer']}")
-        print(f"         Time:   {result['duration']:.2f}s")
-        print()
+        print_result(result)
 
-    # Repetition test: same question multiple times to check consistency.
+    # Repetition test.
     print("\n--- Repetition Test (15 * 23 asked 5 times) ---\n")
     repeat_question = "What is 15 * 23?"
-    repeat_results = [run_single_test(repeat_question, 345) for _ in range(5)]
+    repeat_results = [run_single_test(repeat_question, expected=345) for _ in range(5)]
     for i, result in enumerate(repeat_results, 1):
         status = "PASS" if result["passed"] else "FAIL"
-        print(f"  Run {i}: {status} -> {result['answer']} (actual={result['actual']})")
+        print(f"  Run {i}: {status} -> {result['answer']!r}")
     results.extend(repeat_results)
 
     # Summary.
-    math_results = [r for r in results if r["expected"] is not None]
-    non_math_results = [r for r in results if r["expected"] is None]
+    math_results = [r for r in results if r["question"] in [q for q, _ in MATH_QUESTIONS]]
+    read_results = [r for r in results if r["question"] in [q for q, _ in READ_FILE_QUESTIONS]]
+    multi_results = [r for r in results if r["question"] in [q for q, _ in MULTI_STEP_QUESTIONS]]
+    non_math_results = [r for r in results if r["question"] in [q for q, _ in NON_MATH_QUESTIONS]]
+    repeat_summary = repeat_results
 
     passed_math = sum(r["passed"] for r in math_results)
+    passed_read = sum(r["passed"] for r in read_results)
+    passed_multi = sum(r["passed"] for r in multi_results)
     passed_non_math = sum(r["passed"] for r in non_math_results)
+    passed_repeat = sum(r["passed"] for r in repeat_summary)
+
+    total_passed = sum(r["passed"] for r in results)
+    total = len(results)
 
     durations = [r["duration"] for r in results]
 
@@ -172,14 +211,16 @@ def main():
     print("SUMMARY")
     print("=" * 70)
     print(f"Math questions:       {passed_math} / {len(math_results)} passed")
+    print(f"Read-file questions:  {passed_read} / {len(read_results)} passed")
+    print(f"Multi-step questions: {passed_multi} / {len(multi_results)} passed")
     print(f"Non-math questions:   {passed_non_math} / {len(non_math_results)} passed")
-    print(f"Total:                {passed_math + passed_non_math} / {len(results)} passed")
+    print(f"Repetition test:      {passed_repeat} / {len(repeat_summary)} passed")
+    print(f"Total:                {total_passed} / {total} passed")
     print(f"Mean response time:   {statistics.mean(durations):.2f}s")
     print(f"Max response time:    {max(durations):.2f}s")
     print("=" * 70)
 
-    # Return non-zero exit code if any test failed.
-    failed = len(results) - (passed_math + passed_non_math)
+    failed = total - total_passed
     return 0 if failed == 0 else 1
 
 

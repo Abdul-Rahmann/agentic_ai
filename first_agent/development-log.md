@@ -248,6 +248,76 @@ Max response time:     1.71s
 
 ---
 
+## Experiment 2: Multi-Tool Agent
+
+**Date**: 2026-08-09  
+**Goal**: Add a second tool (`read_file`) and evolve the agent from a single-purpose math assistant into a multi-tool agent that can plan sequences of tool calls.
+
+### What was added
+
+- New tool: `read_file(path)` — reads text files within the `first_agent` directory.
+- Tool loop: the agent can now call tools repeatedly until it has enough information.
+- New sample data file: `first_agent/data/numbers.txt`.
+- Updated stress test covering math, file reads, multi-step tasks, and non-math questions.
+
+### Architecture
+
+```
+Perceive question
+    ↓
+Plan: choose a tool or answer directly
+    ↓
+Execute tool
+    ↓
+Observe result
+    ↓
+Re-plan or answer
+    ↓
+Final answer synthesis
+```
+
+### First multi-tool attempt issues
+
+| Symptom | Cause |
+|---|---|
+| Infinite tool loops for simple questions | The model did not recognize that a single tool result already answered the question. |
+| Redundant tool calls (oscillating between read and calculate) | The model re-called tools it had already used. |
+| Stray `assistant\n\n` prefix in final answer | Small local model echoed the role label in the answer phase. |
+
+### Fixes applied
+
+1. **Explicit examples in plan prompt** showing when to answer directly after a tool result.
+2. **Explicit rule**: do not repeat a tool call already in history.
+3. **History-level guard**: the agent is blocked from calling the same tool with the same input twice, not just the immediately previous step.
+4. **Answer cleanup**: strips common prefixes like `assistant:` and `Answer:` from the final output.
+5. **Safety restriction**: `read_file` only reads files inside the `first_agent` directory.
+
+### Stress test results
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                29 / 29 passed (100%)
+Mean response time:    2.30s
+Max response time:     6.80s
+```
+
+The `data/numbers.txt` file now contains: `12, 15, 23, 8, 2, 3, 5`.
+- Sum: `68`
+- Product: `993600`
+
+### Key observations
+
+- Multi-step planning (`read_file` → `calculate` → answer) works with a small local model when the loop and guards are explicit.
+- The local model is slow but consistent: 29/29 passed.
+- Guards are critical for multi-turn loops. Without them, the agent repeats tools indefinitely.
+- The final answer phase is fragile with small models and needs output cleanup.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -272,7 +342,8 @@ Max response time:     1.71s
 
 ## Next Steps
 
-- Add a second tool (e.g., `read_file` or `get_current_date`) and practice multi-tool selection.
-- Add a reflection phase where a separate prompt verifies the answer before it is returned.
-- Add structured logging so every run produces a JSON trace file for post-hoc analysis.
-- Expand the benchmark script with more edge cases and adversarial prompts.
+- [x] Add a second tool (`read_file`) and practice multi-tool selection.
+- [ ] Add a reflection phase where a separate prompt verifies the answer before it is returned.
+- [ ] Add structured logging so every run produces a JSON trace file for post-hoc analysis.
+- [ ] Add a third tool (e.g., web search or code execution sandbox).
+- [ ] Expand the benchmark script with more edge cases and adversarial prompts.

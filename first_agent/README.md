@@ -1,21 +1,41 @@
-# First Agent: Simple Math Assistant
+# First Agent: Multi-Tool Assistant
 
-This is the smallest possible agent that demonstrates the full loop:
+This agent started as a simple math assistant and evolved into a multi-tool agent that can:
 
-1. **Perceive** the user's math question.
-2. **Plan/Reason** whether a calculation is needed.
-3. **Select a tool** (`calculate`).
-4. **Execute** the tool (evaluate the expression safely).
-5. **Observe** the result.
-6. **Return** the final answer.
+1. Evaluate math expressions with `calculate(expression)`.
+2. Read text files with `read_file(path)`.
+3. Combine both tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”*
 
-It uses a **two-phase design** to make a small local model reliable:
+It demonstrates the full agent loop with **tool selection, execution, and multi-turn planning**.
 
-- **Phase 1 — Plan**: the model decides if a calculation is needed and outputs the JSON tool call.
-- **Phase 2 — Answer**: the model receives the tool result and outputs the final answer only.
-- **Guard**: if the final answer does not contain the computed result, the agent returns the raw result.
+## Architecture
 
-This separation removes the ambiguity that caused the single-prompt version to repeat tool calls and hallucinate. See `development-log.md` for the full iteration history.
+```
+Perceive question
+    ↓
+Plan: choose a tool or answer directly
+    ↓
+Execute tool
+    ↓
+Observe result
+    ↓
+Re-plan or answer
+    ↓
+Final answer synthesis
+```
+
+The agent uses a **tool loop** followed by a **final answer phase**:
+
+- **Tool loop**: repeatedly plans and executes tools until the model decides it has enough information.
+- **Final answer phase**: synthesizes the gathered tool results into a concise answer.
+- **Guards**: prevents infinite loops by blocking repeated tool calls and by returning clean errors when a tool fails.
+
+## Files
+
+- `math_agent.py` — the agent implementation
+- `data/numbers.txt` — sample data file for read-file and multi-step tests
+- `stress_test.py` — benchmark suite covering math, file reads, multi-step tasks, and non-math questions
+- `development-log.md` — detailed design/evolution history
 
 ## Requirements
 
@@ -30,38 +50,31 @@ pip install ollama
 
 (Already installed in this environment.)
 
-## Run the agent
+## Run the agent interactively
 
 ```bash
 python first_agent/math_agent.py
 ```
 
-Then try questions like:
+Try questions like:
 
 - `What is 15 * 23?`
-- `What is sqrt(144) + 5?`
-- `What is 2 ** 10?`
+- `What is in data/numbers.txt?`
+- `What is the sum of the numbers in data/numbers.txt?` (answer: `68`)
+- `What is the product of the numbers in data/numbers.txt?` (answer: `993600`)
+- `What is the capital of France?`
 
-## What to watch for
+## Run the stress test
 
-Each run prints the agent's internal steps. You should see:
+```bash
+python first_agent/stress_test.py
+```
 
-1. **Plan phase**: the agent outputs a JSON tool call like `{"tool": "calculate", "input": "15 * 23"}`.
-2. **Tool execution**: the tool prints the computed result.
-3. **Answer phase**: the agent returns the final answer.
-
-If the final answer does not contain the tool result, the guard returns the raw result instead.
-
-## Common issues
-
-- **Model does not follow JSON format**: Add more few-shot examples to the plan prompt, or switch to a stronger model (e.g., `gpt-4o-mini`) by setting `USE_OPENAI=1` and `AGENT_MODEL=gpt-4o-mini`.
-- **Wrong expression**: The LLM may mis-transcribe the math. More examples in the plan prompt help.
-- **Final answer is wrong even though tool result is correct**: The guard catches this by returning the raw tool result. If this happens often, tighten the answer prompt or use a stronger model.
-- **Safety note**: `calculate` uses a restricted `eval`. This is safe for arithmetic but should never be exposed to untrusted users or arbitrary code.
+The current suite covers 29 cases and passes all of them with `llama3.1:latest`.
 
 ## Run with OpenAI (optional)
 
-If you want stronger and more reliable instruction following:
+For stronger instruction following and faster responses:
 
 ```bash
 export USE_OPENAI=1
@@ -71,9 +84,37 @@ python first_agent/math_agent.py
 
 Make sure `OPENAI_API_KEY` is set in your environment.
 
-## Next steps after this works
+## Tool details
 
-1. Add a second tool (e.g., `get_current_date` or `read_file`).
-2. Add a reflection step: after getting the tool result, ask the agent to verify the answer.
-3. Add memory: keep the conversation history across multiple questions.
-4. Add observability: log every step, tool call, and result to a file or tracing dashboard.
+### `calculate(expression)`
+
+Evaluates a mathematical expression in a restricted Python environment. Supports:
+
+- Basic arithmetic: `+`, `-`, `*`, `/`, `**`, `^` (normalized to `**`)
+- Math functions from the `math` module: `sqrt`, `sin`, `log`, `pow`, etc.
+- Factorial: `5!` (normalized to `factorial(5)`)
+
+### `read_file(path)`
+
+Reads a text file relative to the `first_agent` directory. Paths outside this directory are blocked for safety.
+
+## Guards and reliability patterns
+
+- **No repeated tool calls**: the agent is not allowed to call the same tool with the same input twice. This prevents infinite loops.
+- **Clean error messages**: if a tool fails, the user sees a readable error instead of a raw Python traceback.
+- **Answer cleanup**: removes stray prefixes like `assistant:` or `Answer:` that small local models sometimes emit.
+- **Expression normalization**: common math notation (`^`, `!`) is rewritten to valid Python before evaluation.
+
+## Lessons learned
+
+1. Small local models need very explicit prompts and few-shot examples to handle multi-turn tool loops.
+2. Splitting planning and answering into separate phases helps the model follow instructions.
+3. Guards are essential for production-like reliability: they prevent infinite loops and catch tool failures.
+4. A deterministic tool (calculator, file reader) should do the actual work; the LLM decides which tool to use and when.
+
+## Next steps
+
+1. Add a reflection phase: a separate critic prompt verifies the final answer before returning it.
+2. Add structured observability: write every run to a JSON trace file.
+3. Add a third tool, such as a web search or a Python code execution sandbox.
+4. Evaluate the agent on longer, more ambiguous multi-step tasks.

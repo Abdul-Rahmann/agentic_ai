@@ -1,14 +1,16 @@
 """
-Minimal agent: a math assistant that uses a tool.
+Multi-tool agent: a math assistant that can also read files.
 
-Demonstrates the core agent loop with a two-phase design to make a small local
-model more reliable:
+This evolves the two-phase design into a general tool loop:
 
-  Phase 1 - Plan: decide whether a calculation is needed and which expression to use.
-  Phase 2 - Answer: given the tool result, produce the final answer.
+  1. Plan: decide whether to use a tool.
+  2. Execute: run the selected tool and record the result.
+  3. Repeat: plan again with the new information.
+  4. Answer: once no more tools are needed, produce the final answer.
 
-This is less flexible than a single open-ended loop, but much easier to debug
-and a better starting point for learning.
+Tools:
+  - calculate(expression): evaluates a mathematical expression.
+  - read_file(path): reads a text file within the project directory.
 
 Runs locally with Ollama (llama3.1). Set USE_OPENAI=1 to use OpenAI instead.
 """
@@ -22,24 +24,20 @@ import ollama
 
 MODEL = os.getenv("AGENT_MODEL", "llama3.1:latest")
 USE_OPENAI = os.getenv("USE_OPENAI", "0") == "1"
+MAX_TOOL_STEPS = 5
+
+# Root directory for file reads. Absolute paths outside this are blocked.
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 
 # -----------------------------------------------------------------------------
-# Tool: calculate
+# Tools
 # -----------------------------------------------------------------------------
-
-
-def normalize_expression(expression: str) -> str:
-    """Rewrite common math notation into valid Python syntax."""
-    # n! -> factorial(n)  (factorial is imported from math in the evaluator)
-    expression = re.sub(r"(\d+)!", r"factorial(\1)", expression)
-    # ^ -> ** for exponentiation (common math notation, not Python XOR)
-    expression = expression.replace("^", "**")
-    return expression
 
 
 def calculate(expression: str) -> str:
     """Evaluate a math expression in a restricted environment."""
-    expression = normalize_expression(expression)
+    expression = _normalize_expression(expression)
     safe_globals = {"__builtins__": {}}
     safe_locals = {
         name: getattr(math, name)
@@ -59,6 +57,37 @@ def calculate(expression: str) -> str:
         return str(result)
     except Exception as e:
         return f"Error: {e}"
+
+
+def _normalize_expression(expression: str) -> str:
+    """Rewrite common math notation into valid Python syntax."""
+    # n! -> factorial(n)
+    expression = re.sub(r"(\d+)!", r"factorial(\1)", expression)
+    # ^ -> ** for exponentiation (common math notation, not Python XOR)
+    expression = expression.replace("^", "**")
+    return expression
+
+
+def read_file(path: str) -> str:
+    """Read a text file within the project directory."""
+    target = os.path.abspath(os.path.join(PROJECT_ROOT, path))
+    if not target.startswith(PROJECT_ROOT):
+        return "Error: path is outside the allowed project directory"
+    if not os.path.exists(target):
+        return f"Error: file not found: {path}"
+    if not os.path.isfile(target):
+        return f"Error: not a file: {path}"
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"Error: {e}"
+
+
+TOOLS = {
+    "calculate": calculate,
+    "read_file": read_file,
+}
 
 
 # -----------------------------------------------------------------------------
@@ -93,95 +122,142 @@ def chat(messages: list, temperature: float = 0.0) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Two-phase agent
+# Prompts
 # -----------------------------------------------------------------------------
 
 
-PLAN_SYSTEM_PROMPT = """You are a math assistant. Your job is to decide whether a user question requires a calculation.
+_PLAN_SYSTEM_PROMPT = """You are a helpful assistant. You have access to these tools:
+
+- calculate(expression): evaluates a mathematical expression and returns the result.
+- read_file(path): reads the contents of a text file within the project directory.
 
 Rules:
-1. If the question requires math, output ONLY a JSON object in this exact format:
-   {"tool": "calculate", "input": "<math expression>"}
-2. If the question does NOT require math, output the answer directly in plain text.
-3. Do not include any explanation, code block, or extra text.
+1. If you need to use a tool, respond with ONLY a JSON object in this exact format:
+   {"tool": "calculate", "input": "<expression>"}
+   or
+   {"tool": "read_file", "input": "<path>"}
+2. If you already have enough information to answer the user's question, respond with the final answer in plain text.
+3. Do NOT repeat a tool call you have already made. Use the result you already have.
+4. Do not include any explanation, code blocks, or markdown outside the JSON or the final answer.
 
 Examples:
 
 User: What is 2 + 2?
 Assistant: {"tool": "calculate", "input": "2 + 2"}
+Tool result: 4
+Assistant: 4
 
-User: What is 15 * 23?
-Assistant: {"tool": "calculate", "input": "15 * 23"}
+User: What is in data/numbers.txt?
+Assistant: {"tool": "read_file", "input": "data/numbers.txt"}
+Tool result: 12\n15\n23\n8\n2\n3\n5
+Assistant: 12\n15\n23\n8\n2\n3\n5
 
-User: What is 2 to the power of 10?
-Assistant: {"tool": "calculate", "input": "2 ** 10"}
-
-User: What is factorial of 5?
-Assistant: {"tool": "calculate", "input": "5!"}
+User: What is the sum of the numbers in data/numbers.txt?
+Assistant: {"tool": "read_file", "input": "data/numbers.txt"}
+Tool result: 12\n15\n23\n8\n2\n3\n5
+Assistant: {"tool": "calculate", "input": "12 + 15 + 23 + 8 + 2 + 3 + 5"}
+Tool result: 68
+Assistant: 68
 
 User: What is the capital of France?
 Assistant: Paris
 """
 
 
-ANSWER_SYSTEM_PROMPT = """You are a math assistant. You have already used a calculator tool to get the result of a user's question.
+def _build_plan_messages(question: str, tool_history: list) -> list:
+    """Build the messages for the planning step, including tool history."""
+    content = _PLAN_SYSTEM_PROMPT
+    if tool_history:
+        content += "\n\nYou have already used tools. Here are the results:\n"
+        for tool_name, tool_input, tool_result in tool_history:
+            content += f"\n{tool_name}({tool_input}) -> {tool_result}"
+        content += "\n\nIf you need another tool, use JSON. If you have enough information, answer directly."
 
-Rules:
-1. Output ONLY the final answer in plain text.
-2. Do not include the calculation, JSON, code blocks, or explanation.
-3. Do not call the tool again.
+    return [
+        {"role": "system", "content": content},
+        {"role": "user", "content": question},
+    ]
 
-Example:
-Question: What is 2 + 2?
-Tool result: 4
-Assistant: 4
-"""
+
+def _build_answer_messages(question: str, tool_history: list) -> list:
+    """Build the messages for the final answer step."""
+    content = "Use the tool results below to answer the question. Output ONLY the final answer in plain text, with no explanation.\n\n"
+    content += "Tool results:\n"
+    for tool_name, tool_input, tool_result in tool_history:
+        content += f"\n  {tool_name}({tool_input}) -> {tool_result}"
+    content += f"\n\nQuestion: {question}\n\nFinal answer:"
+
+    return [
+        {"role": "user", "content": content},
+    ]
+
+
+def _clean_answer(text: str) -> str:
+    """Remove common role prefixes and blank lines that small models may emit."""
+    text = text.strip()
+    prefixes = ("assistant", "Assistant", "answer:", "Answer:", "final answer:", "Final answer:")
+    for prefix in prefixes:
+        if text.lower().startswith(prefix.lower()):
+            text = text[len(prefix):].strip()
+            # Also strip a leading colon or newline if present.
+            text = text.lstrip(":\n").strip()
+            break
+    return text
+
+
+# -----------------------------------------------------------------------------
+# Agent loop
+# -----------------------------------------------------------------------------
 
 
 def run_agent(question: str, verbose: bool = False) -> str:
-    # Phase 1: plan / decide tool.
-    plan_messages = [
-        {"role": "system", "content": PLAN_SYSTEM_PROMPT},
-        {"role": "user", "content": question},
-    ]
-    plan_output = chat(plan_messages)
-    if verbose:
-        print(f"[Plan] Agent: {plan_output}")
+    tool_history = []
 
-    tool_call = extract_json(plan_output)
-
-    if not tool_call or tool_call.get("tool") != "calculate":
-        # No math needed or model chose to answer directly.
-        return plan_output
-
-    expression = tool_call.get("input", "")
-    result = calculate(expression)
-    if verbose:
-        print(f"[Tool] calculate({expression}) = {result}")
-
-    # If the tool itself failed, return a clean error instead of confusing the answer phase.
-    if result.startswith("Error:"):
+    # Tool loop: plan and execute until no tool is needed.
+    for step in range(MAX_TOOL_STEPS):
+        plan_messages = _build_plan_messages(question, tool_history)
+        plan_output = chat(plan_messages)
         if verbose:
-            print(f"[Guard] Tool failed. Returning error message.")
-        return f"I could not calculate that. The expression '{expression}' is not valid Python math syntax."
+            print(f"[Plan {step + 1}] Agent: {plan_output}")
 
-    # Phase 2: answer given the tool result.
-    answer_messages = [
-        {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"Question: {question}\nTool result: {result}",
-        },
-    ]
+        tool_call = extract_json(plan_output)
+
+        # No tool call: the model thinks it can answer directly.
+        if not tool_call or tool_call.get("tool") not in TOOLS:
+            if not tool_history:
+                # No tools used yet; treat this as the direct answer.
+                return plan_output
+            # Tools were used; move to the final answer phase.
+            break
+
+        tool_name = tool_call["tool"]
+        tool_input = tool_call.get("input", "")
+
+        # Guard: do not repeat any tool call that already appears in history.
+        if any(name == tool_name and inp == tool_input for name, inp, _ in tool_history):
+            if verbose:
+                print(f"[Guard] Repeated tool call detected. Moving to answer phase.")
+            break
+
+        tool_fn = TOOLS[tool_name]
+        result = tool_fn(tool_input)
+
+        if verbose:
+            print(f"[Tool {step + 1}] {tool_name}({tool_input}) = {result}")
+
+        if result.startswith("Error:"):
+            if verbose:
+                print(f"[Guard] Tool failed. Returning error message.")
+            return f"I could not use {tool_name}. {result}"
+
+        tool_history.append((tool_name, tool_input, result))
+
+    # Final answer phase: synthesize the gathered information.
+    answer_messages = _build_answer_messages(question, tool_history)
     answer_output = chat(answer_messages)
+    answer_output = _clean_answer(answer_output)
     if verbose:
         print(f"[Answer] Agent: {answer_output}")
-
-    # Guard: if the final answer does not contain the computed result, return the raw result.
-    if str(result) not in answer_output:
-        if verbose:
-            print(f"[Guard] Final answer did not contain tool result. Returning raw result.")
-        return result
 
     return answer_output
 
@@ -193,12 +269,12 @@ def run_agent(question: str, verbose: bool = False) -> str:
 
 if __name__ == "__main__":
     provider = "OpenAI" if USE_OPENAI else "Ollama"
-    print(f"Simple Math Agent ({provider} / {MODEL})")
+    print(f"Multi-Tool Agent ({provider} / {MODEL})")
     print("Type 'exit' to quit.\n")
 
     try:
         while True:
-            question = input("Ask a math question: ").strip()
+            question = input("Ask a question: ").strip()
             if question.lower() in {"exit", "quit"}:
                 break
             if not question:

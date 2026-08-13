@@ -440,6 +440,55 @@ Final answer: 19.0
 
 ---
 
+### Experiment 2: Multi-Tool Agent (calculate + read_file)
+
+**Date**: 2026-08-09  
+**Location**: `first_agent/math_agent.py`, `first_agent/stress_test.py`  
+**Goal**: Add a second tool and evolve the agent from a single-purpose math assistant into a multi-tool agent that can plan sequences of tool calls.
+
+**What was built**:
+- Added `read_file(path)` tool that reads text files within the `first_agent` directory.
+- Replaced the two-phase plan/answer design with a **tool loop + final answer phase**:
+  - Plan: decide which tool to use or answer directly.
+  - Execute: run the tool and record the result.
+  - Re-plan: repeat until the model has enough information.
+  - Answer: synthesize a final answer from the tool history.
+- Added a guard that prevents the exact same tool call from being executed twice.
+- Added safety restriction: `read_file` only reads files inside the project directory.
+- Added sample data file `first_agent/data/numbers.txt`.
+- Expanded the stress test to cover math, file reads, multi-step tasks, and non-math questions.
+
+**Stress test results**:
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                29 / 29 passed (100%)
+Mean response time:    2.30s
+Max response time:     6.80s
+```
+
+The `data/numbers.txt` file now contains: `12, 15, 23, 8, 2, 3, 5`.
+- Sum: `68`
+- Product: `993600`
+
+**Key observations**:
+- Multi-step planning (`read_file` → `calculate` → answer) works with a small local model when the loop and guards are explicit.
+- Small local models struggle to know when to stop calling tools. Explicit rules and history guards are essential.
+- Final answer synthesis is fragile with small models; output cleanup (removing `assistant:` prefixes) is necessary.
+- Deterministic tools do the actual work; the LLM only decides which tool to use and when.
+
+**Next steps for this experiment**:
+- Add a reflection phase where a separate prompt verifies the final answer.
+- Add structured logging to record every tool call and decision.
+- Add a third tool (e.g., web search or code execution sandbox).
+- Test more adversarial and ambiguous multi-step prompts.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -467,6 +516,8 @@ Use this section to track future additions to the notes.
 | 2026-08-09 | Added "Practical Roadmap: How to Start Building Agents" section with the 7-step start-to-build guide. |
 | 2026-08-09 | Added "Build Log" section and recorded Experiment 1: Simple Math Agent using Ollama and a hand-rolled tool loop. |
 | 2026-08-09 | Added stress test for the math agent; fixed expression normalization for `^` and `!`; achieved 26/26 pass rate. |
+| 2026-08-09 | Evolved agent to multi-tool (calculate + read_file); added tool loop, guards, and multi-step stress test; achieved 29/29 pass rate. |
+| 2026-08-09 | Added more numbers (2, 3, 5) to `data/numbers.txt`; updated stress test expected values; still 29/29 passing. |
 
 ---
 
