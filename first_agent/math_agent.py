@@ -19,8 +19,11 @@ import json
 import math
 import os
 import re
+import time
 
 import ollama
+
+from tracer import NullTrace, Trace, current_ms
 
 MODEL = os.getenv("AGENT_MODEL", "llama3.1:latest")
 USE_OPENAI = os.getenv("USE_OPENAI", "0") == "1"
@@ -210,56 +213,127 @@ def _clean_answer(text: str) -> str:
 # -----------------------------------------------------------------------------
 
 
-def run_agent(question: str, verbose: bool = False) -> str:
+def run_agent(question: str, verbose: bool = False, trace: bool = True) -> str:
+    provider = "OpenAI" if USE_OPENAI else "Ollama"
+    tracer = Trace(question, MODEL, provider) if trace else NullTrace()
+
+    run_start = current_ms()
     tool_history = []
+    final_answer = None
 
-    # Tool loop: plan and execute until no tool is needed.
-    for step in range(MAX_TOOL_STEPS):
-        plan_messages = _build_plan_messages(question, tool_history)
-        plan_output = chat(plan_messages)
-        if verbose:
-            print(f"[Plan {step + 1}] Agent: {plan_output}")
+    try:
+        # Tool loop: plan and execute until no tool is needed.
+        for step in range(MAX_TOOL_STEPS):
+            plan_messages = _build_plan_messages(question, tool_history)
+            plan_start = current_ms()
+            plan_output = chat(plan_messages)
+            plan_duration = current_ms() - plan_start
 
-        tool_call = extract_json(plan_output)
-
-        # No tool call: the model thinks it can answer directly.
-        if not tool_call or tool_call.get("tool") not in TOOLS:
-            if not tool_history:
-                # No tools used yet; treat this as the direct answer.
-                return plan_output
-            # Tools were used; move to the final answer phase.
-            break
-
-        tool_name = tool_call["tool"]
-        tool_input = tool_call.get("input", "")
-
-        # Guard: do not repeat any tool call that already appears in history.
-        if any(name == tool_name and inp == tool_input for name, inp, _ in tool_history):
             if verbose:
-                print(f"[Guard] Repeated tool call detected. Moving to answer phase.")
-            break
+                print(f"[Plan {step + 1}] Agent: {plan_output}")
 
-        tool_fn = TOOLS[tool_name]
-        result = tool_fn(tool_input)
+            tool_call = extract_json(plan_output)
 
-        if verbose:
-            print(f"[Tool {step + 1}] {tool_name}({tool_input}) = {result}")
+            # No tool call: the model thinks it can answer directly.
+            if not tool_call or tool_call.get("tool") not in TOOLS:
+                if not tool_history:
+                    # No tools used yet; treat this as the direct answer.
+                    final_answer = _clean_answer(plan_output)
+                    tracer.add_step(
+                        phase="direct_answer",
+                        llm_output=plan_output,
+                        duration_ms=plan_duration,
+                    )
+                    break
+                # Tools were used; move to the final answer phase.
+                tracer.add_step(
+                    phase="plan",
+                    llm_output=plan_output,
+                    duration_ms=plan_duration,
+                    guard_triggered=True,
+                    guard_reason="model answered directly after tool history; moving to answer phase",
+                )
+                break
 
-        if result.startswith("Error:"):
+            tool_name = tool_call["tool"]
+            tool_input = tool_call.get("input", "")
+
+            # Guard: do not repeat any tool call that already appears in history.
+            if any(name == tool_name and inp == tool_input for name, inp, _ in tool_history):
+                if verbose:
+                    print(f"[Guard] Repeated tool call detected. Moving to answer phase.")
+                tracer.add_step(
+                    phase="plan",
+                    llm_output=plan_output,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    duration_ms=plan_duration,
+                    guard_triggered=True,
+                    guard_reason="repeated tool call blocked",
+                )
+                break
+
+            tool_fn = TOOLS[tool_name]
+            tool_start = current_ms()
+            result = tool_fn(tool_input)
+            tool_duration = current_ms() - tool_start
+
             if verbose:
-                print(f"[Guard] Tool failed. Returning error message.")
-            return f"I could not use {tool_name}. {result}"
+                print(f"[Tool {step + 1}] {tool_name}({tool_input}) = {result}")
 
-        tool_history.append((tool_name, tool_input, result))
+            tracer.add_step(
+                phase="plan",
+                llm_output=plan_output,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_result=result,
+                duration_ms=plan_duration + tool_duration,
+            )
 
-    # Final answer phase: synthesize the gathered information.
-    answer_messages = _build_answer_messages(question, tool_history)
-    answer_output = chat(answer_messages)
-    answer_output = _clean_answer(answer_output)
-    if verbose:
-        print(f"[Answer] Agent: {answer_output}")
+            if result.startswith("Error:"):
+                if verbose:
+                    print(f"[Guard] Tool failed. Returning error message.")
+                final_answer = f"I could not use {tool_name}. {result}"
+                tracer.add_step(
+                    phase="error",
+                    llm_output="",
+                    guard_triggered=True,
+                    guard_reason=f"tool {tool_name} returned error",
+                )
+                break
 
-    return answer_output
+            tool_history.append((tool_name, tool_input, result))
+
+        # Final answer phase: synthesize the gathered information.
+        if final_answer is None:
+            answer_messages = _build_answer_messages(question, tool_history)
+            answer_start = current_ms()
+            answer_output = chat(answer_messages)
+            answer_duration = current_ms() - answer_start
+            answer_output = _clean_answer(answer_output)
+            if verbose:
+                print(f"[Answer] Agent: {answer_output}")
+            final_answer = answer_output
+            tracer.add_step(
+                phase="answer",
+                llm_output=answer_output,
+                duration_ms=answer_duration,
+            )
+
+    except Exception as e:
+        final_answer = f"Agent error: {e}"
+        tracer.error = str(e)
+        if verbose:
+            print(f"[Error] {e}")
+
+    total_duration = current_ms() - run_start
+    tracer.finalize(final_answer, total_duration, tracer.error)
+    trace_path = tracer.write()
+
+    if trace_path and verbose:
+        print(f"[Trace] written to {trace_path}")
+
+    return final_answer
 
 
 # -----------------------------------------------------------------------------

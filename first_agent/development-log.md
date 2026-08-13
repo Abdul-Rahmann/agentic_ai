@@ -315,6 +315,93 @@ The `data/numbers.txt` file now contains: `12, 15, 23, 8, 2, 3, 5`.
 - The local model is slow but consistent: 29/29 passed.
 - Guards are critical for multi-turn loops. Without them, the agent repeats tools indefinitely.
 - The final answer phase is fragile with small models and needs output cleanup.
+- Deterministic tools do the actual work; the LLM only decides which tool to use and when.
+
+---
+
+## Experiment 3: Structured Observability / Tracing
+
+**Date**: 2026-08-13  
+**Goal**: Add structured tracing so every run produces a machine-readable record of decisions, tool calls, results, timings, and guards.
+
+### What was built
+
+- New module: `first_agent/tracer.py` with:
+  - `Trace` class that records question, model, provider, steps, tool calls, results, guard triggers, timings, and final answer.
+  - `NullTrace` class used when tracing is disabled.
+  - `write()` method that persists each trace as a JSON file in `first_agent/traces/`.
+- Updated `math_agent.py` to instrument every phase of `run_agent` and write a trace by default.
+- Updated `stress_test.py` to disable tracing (`trace=False`) so benchmark runs do not flood the traces directory.
+- Added trace documentation to `README.md`.
+
+### Why it matters
+
+- Reproducibility: every run is recorded exactly, including the raw LLM outputs.
+- Debugging: when a failure happens, you can replay the exact sequence of decisions.
+- Measurement: traces contain per-step and total latency.
+- Safety: traces provide an audit log of what tools were called and what data was accessed.
+
+### Example trace output
+
+```json
+{
+  "trace_id": "c7e21dac",
+  "timestamp": "2026-08-13T13:10:54.217023+00:00",
+  "question": "What is the sum of the numbers in data/numbers.txt?",
+  "model": "llama3.1:latest",
+  "provider": "Ollama",
+  "steps": [
+    {
+      "step": 1,
+      "phase": "plan",
+      "llm_output": "{\"tool\": \"read_file\", \"input\": \"data/numbers.txt\"}",
+      "tool_name": "read_file",
+      "tool_input": "data/numbers.txt",
+      "tool_result": "12\n15\n23\n8\n2\n3\n5\n",
+      "duration_ms": 1005,
+      "guard_triggered": false,
+      "guard_reason": null
+    },
+    {
+      "step": 2,
+      "phase": "plan",
+      "llm_output": "{\"tool\": \"calculate\", \"input\": \"12 + 15 + 23 + 8 + 2 + 3 + 5\"}",
+      "tool_name": "calculate",
+      "tool_input": "12 + 15 + 23 + 8 + 2 + 3 + 5",
+      "tool_result": "68",
+      "duration_ms": 1882,
+      "guard_triggered": false,
+      "guard_reason": null
+    },
+    {
+      "step": 3,
+      "phase": "plan",
+      "llm_output": "68",
+      "duration_ms": 643,
+      "guard_triggered": true,
+      "guard_reason": "model answered directly after tool history; moving to answer phase"
+    },
+    {
+      "step": 4,
+      "phase": "answer",
+      "llm_output": "68",
+      "duration_ms": 645,
+      "guard_triggered": false,
+      "guard_reason": null
+    }
+  ],
+  "final_answer": "68",
+  "total_duration_ms": 4175,
+  "error": null
+}
+```
+
+### Key observations
+
+- Tracing adds minimal overhead but adds huge debugging power.
+- It forces the developer to think about what is worth recording at each step.
+- Guard events should be explicit in traces so you can see why the loop stopped.
+- Stress tests should be able to disable tracing to avoid producing thousands of trace files.
 
 ---
 
@@ -344,6 +431,6 @@ The `data/numbers.txt` file now contains: `12, 15, 23, 8, 2, 3, 5`.
 
 - [x] Add a second tool (`read_file`) and practice multi-tool selection.
 - [ ] Add a reflection phase where a separate prompt verifies the answer before it is returned.
-- [ ] Add structured logging so every run produces a JSON trace file for post-hoc analysis.
+- [x] Add structured logging so every run produces a JSON trace file for post-hoc analysis.
 - [ ] Add a third tool (e.g., web search or code execution sandbox).
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.

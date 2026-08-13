@@ -92,7 +92,7 @@ def run_single_test(question: str, expected=None, expected_substrings=None):
     """Run one test and return pass/fail status and timing."""
     start = time.time()
     try:
-        answer = run_agent(question, verbose=False)
+        answer = run_agent(question, verbose=False, trace=False)
     except Exception as e:
         return {
             "question": question,

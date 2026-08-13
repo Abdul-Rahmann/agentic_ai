@@ -33,8 +33,10 @@ The agent uses a **tool loop** followed by a **final answer phase**:
 ## Files
 
 - `math_agent.py` — the agent implementation
+- `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
 - `stress_test.py` — benchmark suite covering math, file reads, multi-step tasks, and non-math questions
+- `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
 
 ## Requirements
@@ -111,6 +113,48 @@ Reads a text file relative to the `first_agent` directory. Paths outside this di
 2. Splitting planning and answering into separate phases helps the model follow instructions.
 3. Guards are essential for production-like reliability: they prevent infinite loops and catch tool failures.
 4. A deterministic tool (calculator, file reader) should do the actual work; the LLM decides which tool to use and when.
+
+## Observability
+
+Every interactive run automatically writes a JSON trace to `first_agent/traces/`.
+The trace records:
+
+- `trace_id` and `timestamp`
+- The user question
+- The model and provider used
+- Every planning step, tool call, tool result, and timing
+- When a guard triggered and why
+- The final answer and total duration
+
+Example trace file (`first_agent/traces/2026-...__c7e21dac.json`):
+
+```json
+{
+  "trace_id": "c7e21dac",
+  "timestamp": "2026-08-13T13:10:54.217023+00:00",
+  "question": "What is the sum of the numbers in data/numbers.txt?",
+  "model": "llama3.1:latest",
+  "provider": "Ollama",
+  "steps": [
+    {
+      "step": 1,
+      "phase": "plan",
+      "llm_output": "{\"tool\": \"read_file\", \"input\": \"data/numbers.txt\"}",
+      "tool_name": "read_file",
+      "tool_input": "data/numbers.txt",
+      "tool_result": "12\n15\n23\n8\n2\n3\n5\n",
+      "duration_ms": 1005,
+      "guard_triggered": false,
+      "guard_reason": null
+    }
+  ],
+  "final_answer": "68",
+  "total_duration_ms": 4175,
+  "error": null
+}
+```
+
+Traces are disabled during stress testing to keep the benchmark clean.
 
 ## Next steps
 
