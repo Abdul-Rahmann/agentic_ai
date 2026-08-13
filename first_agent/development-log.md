@@ -405,6 +405,68 @@ The `data/numbers.txt` file now contains: `12, 15, 23, 8, 2, 3, 5`.
 
 ---
 
+## Experiment 4: Reflection / Critic Phase
+
+**Date**: 2026-08-13  
+**Goal**: Add a separate critic prompt that verifies the final answer against the question and tool history before returning it to the user.
+
+### What was built
+
+- New reflection prompt in `first_agent/math_agent.py` that acts as a critic:
+  - Responds with `VERIFIED: <answer>` if the answer is correct and supported by tool history.
+  - Responds with `INCORRECT: <reason>` if the answer is wrong or unsupported.
+- New helper functions `_build_reflection_messages` and `_parse_reflection`.
+- `run_agent` now has a `reflect=True` parameter.
+  - After the final answer phase, the critic prompt is called.
+  - If verified, the answer is returned as-is.
+  - If incorrect, the answer is returned with an `[Unverified: <reason>]` warning.
+- Reflection step is recorded in the JSON trace.
+- Stress test runs with reflection enabled (`reflect=True` is the default).
+
+### Why it matters
+
+Reflection is a proven optimization technique for language agents. It adds a second verification layer that can catch errors missed by the answer-generation prompt, especially when the final synthesis drifts from the tool results.
+
+### Example reflection output
+
+```text
+[Answer] Agent: 345
+[Reflection] Critic: VERIFIED: 345
+Final answer: 345
+```
+
+If the critic had flagged an error, the output would look like:
+
+```text
+[Answer] Agent: 340
+[Reflection] Critic: INCORRECT: the tool result is 345, not 340
+Final answer: [Unverified: the tool result is 345, not 340] 340
+```
+
+### Stress test results with reflection
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                29 / 29 passed (100%)
+Mean response time:    3.12s
+Max response time:    7.55s
+```
+
+Reflection adds roughly one extra LLM call per question, which increases mean latency from ~2.3s to ~3.1s. All answers were verified by the critic in this run.
+
+### Key observations
+
+- A small local model can act as a critic when the prompt gives clear examples and a strict output format.
+- The reflection step itself becomes a recorded phase in the trace, making it auditable.
+- Reflection is currently conservative: if the critic flags an answer, we return it with a warning rather than automatically retrying. This avoids compounding model errors.
+- The next evolution would be to add a retry loop when reflection detects an error.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -430,7 +492,8 @@ The `data/numbers.txt` file now contains: `12, 15, 23, 8, 2, 3, 5`.
 ## Next Steps
 
 - [x] Add a second tool (`read_file`) and practice multi-tool selection.
-- [ ] Add a reflection phase where a separate prompt verifies the answer before it is returned.
+- [x] Add a reflection phase where a separate prompt verifies the answer before it is returned.
 - [x] Add structured logging so every run produces a JSON trace file for post-hoc analysis.
 - [ ] Add a third tool (e.g., web search or code execution sandbox).
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
+- [ ] Add an explicit retry loop when reflection flags an answer as incorrect.

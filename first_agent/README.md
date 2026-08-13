@@ -106,13 +106,17 @@ Reads a text file relative to the `first_agent` directory. Paths outside this di
 - **Clean error messages**: if a tool fails, the user sees a readable error instead of a raw Python traceback.
 - **Answer cleanup**: removes stray prefixes like `assistant:` or `Answer:` that small local models sometimes emit.
 - **Expression normalization**: common math notation (`^`, `!`) is rewritten to valid Python before evaluation.
+- **Reflection / critic**: before returning the final answer, a separate prompt verifies it against the tool history. If it flags an issue, the answer is returned with an `[Unverified: ...]` warning.
 
-## Lessons learned
+## Reflection
 
-1. Small local models need very explicit prompts and few-shot examples to handle multi-turn tool loops.
-2. Splitting planning and answering into separate phases helps the model follow instructions.
-3. Guards are essential for production-like reliability: they prevent infinite loops and catch tool failures.
-4. A deterministic tool (calculator, file reader) should do the actual work; the LLM decides which tool to use and when.
+After the final answer is generated, the agent runs a separate **critic** prompt that verifies the answer against the question and the tool history. This is a reflection / self-criticism step.
+
+- If the critic responds with `VERIFIED: <answer>`, the answer is returned as-is.
+- If the critic responds with `INCORRECT: <reason>`, the answer is returned with an `[Unverified: <reason>]` warning.
+- Reflection can be disabled by passing `reflect=False` to `run_agent`.
+
+This pattern catches cases where the final answer synthesis drifted from the tool results.
 
 ## Observability
 
@@ -123,7 +127,7 @@ The trace records:
 - The user question
 - The model and provider used
 - Every planning step, tool call, tool result, and timing
-- When a guard triggered and why
+- Reflection verdicts and guard events
 - The final answer and total duration
 
 Example trace file (`first_agent/traces/2026-...__c7e21dac.json`):
@@ -146,6 +150,14 @@ Example trace file (`first_agent/traces/2026-...__c7e21dac.json`):
       "duration_ms": 1005,
       "guard_triggered": false,
       "guard_reason": null
+    },
+    {
+      "step": 2,
+      "phase": "reflection",
+      "llm_output": "VERIFIED: 68",
+      "duration_ms": 1028,
+      "guard_triggered": false,
+      "guard_reason": null
     }
   ],
   "final_answer": "68",
@@ -156,9 +168,18 @@ Example trace file (`first_agent/traces/2026-...__c7e21dac.json`):
 
 Traces are disabled during stress testing to keep the benchmark clean.
 
+## Lessons learned
+
+1. Small local models need very explicit prompts and few-shot examples to handle multi-turn tool loops.
+2. Splitting planning, answering, and reflection into separate prompts helps the model follow instructions.
+3. Guards are essential for production-like reliability: they prevent infinite loops, catch tool failures, and block repeated calls.
+4. A deterministic tool (calculator, file reader) should do the actual work; the LLM decides which tool to use and when.
+5. Reflection adds a second layer of verification after the final answer synthesis.
+6. Tracing turns opaque failures into replayable records.
+
 ## Next steps
 
-1. Add a reflection phase: a separate critic prompt verifies the final answer before returning it.
-2. Add structured observability: write every run to a JSON trace file.
-3. Add a third tool, such as a web search or a Python code execution sandbox.
-4. Evaluate the agent on longer, more ambiguous multi-step tasks.
+1. Add a third tool, such as a web search or a Python code execution sandbox.
+2. Evaluate the agent on longer, more ambiguous multi-step tasks.
+3. Add an explicit retry path when reflection flags an answer as incorrect.
+4. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.

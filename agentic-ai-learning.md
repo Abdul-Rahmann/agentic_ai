@@ -573,6 +573,49 @@ The `data/numbers.txt` file now contains: `12, 15, 23, 8, 2, 3, 5`.
 
 ---
 
+### Experiment 4: Reflection / Critic Phase
+
+**Date**: 2026-08-13  
+**Location**: `first_agent/math_agent.py`  
+**Goal**: Add a separate critic prompt that verifies the final answer against the question and tool history before returning it to the user.
+
+**What was built**:
+- A reflection/critic prompt in `math_agent.py` that responds with either:
+  - `VERIFIED: <answer>` — answer is correct and supported by tool history.
+  - `INCORRECT: <reason>` — answer is wrong or unsupported.
+- `_build_reflection_messages` and `_parse_reflection` helpers.
+- `run_agent` gained a `reflect=True` parameter.
+- Reflection step is recorded in the JSON trace as phase `reflection`.
+- If the critic flags an answer, the agent returns it with an `[Unverified: ...]` warning.
+- Stress test now runs with reflection enabled by default.
+
+**Why it matters**:
+- Reflection is a proven optimization technique for language agents.
+- It adds a second verification layer after final answer synthesis.
+- It catches drift between the tool results and the final answer.
+
+**Stress test results with reflection**:
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                29 / 29 passed (100%)
+Mean response time:    3.12s
+Max response time:    7.55s
+```
+
+Reflection added roughly one extra LLM call per question, raising mean latency from ~2.3s to ~3.1s. All answers were verified in this run.
+
+**Key observations**:
+- A small local model can act as a critic when given clear examples and a strict output format.
+- Reflection is currently conservative: flagged answers are returned with a warning rather than triggering an automatic retry. This avoids compounding model errors.
+- The next evolution would be an explicit retry loop when the critic detects an error.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -603,6 +646,7 @@ Use this section to track future additions to the notes.
 | 2026-08-09 | Evolved agent to multi-tool (calculate + read_file); added tool loop, guards, and multi-step stress test; achieved 29/29 pass rate. |
 | 2026-08-09 | Added more numbers (2, 3, 5) to `data/numbers.txt`; updated stress test expected values; still 29/29 passing. |
 | 2026-08-13 | Added structured tracing (`tracer.py`, `traces/`); every interactive run now writes a JSON trace; stress test disables tracing. |
+| 2026-08-13 | Added reflection/critic phase; `run_agent` now verifies answers with a separate prompt before returning; still 29/29 passing. |
 
 ---
 

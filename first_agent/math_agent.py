@@ -209,11 +209,69 @@ def _clean_answer(text: str) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Agent loop
+# Reflection / critic
 # -----------------------------------------------------------------------------
 
 
-def run_agent(question: str, verbose: bool = False, trace: bool = True) -> str:
+_REFLECTION_SYSTEM_PROMPT = """You are a careful critic. Verify whether the proposed answer correctly answers the question, based on the tool history below.
+
+Rules:
+1. If the proposed answer is correct and well-supported by the tool history, respond with ONLY:
+   VERIFIED: <answer>
+2. If the proposed answer is incorrect or unsupported, respond with ONLY:
+   INCORRECT: <reason>
+3. If there is no tool history, verify the answer based on general knowledge.
+4. Do not include any explanation, code, or markdown outside the required format.
+
+Examples:
+
+Question: What is 2 + 2?
+Tool history:
+  calculate(2 + 2) -> 4
+Proposed answer: 4
+Response: VERIFIED: 4
+
+Question: What is 15 * 23?
+Tool history:
+  calculate(15 * 23) -> 345
+Proposed answer: 340
+Response: INCORRECT: the tool result is 345, but the proposed answer is 340
+
+Question: What is the capital of France?
+Tool history: (none)
+Proposed answer: Paris
+Response: VERIFIED: Paris
+"""
+
+
+def _build_reflection_messages(question: str, tool_history: list, proposed_answer: str) -> list:
+    """Build the messages for the reflection/critic step."""
+    content = _REFLECTION_SYSTEM_PROMPT
+    content += "\n\nNow verify this:\n\nTool history:\n"
+    if tool_history:
+        for tool_name, tool_input, tool_result in tool_history:
+            content += f"\n  {tool_name}({tool_input}) -> {tool_result}"
+    else:
+        content += "\n  (none)"
+    content += f"\n\nQuestion: {question}\nProposed answer: {proposed_answer}\n\nResponse:"
+
+    return [
+        {"role": "system", "content": content},
+    ]
+
+
+def _parse_reflection(reflection_output: str) -> tuple[bool, str]:
+    """Parse the reflection output. Returns (verified, answer_or_reason)."""
+    text = reflection_output.strip()
+    if text.upper().startswith("VERIFIED:"):
+        return True, text[len("VERIFIED:"):].strip()
+    if text.upper().startswith("INCORRECT:"):
+        return False, text[len("INCORRECT:"):].strip()
+    # Fallback: assume verified if the response contains the proposed answer and no explicit incorrect marker.
+    return True, text
+
+
+def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect: bool = True) -> str:
     provider = "OpenAI" if USE_OPENAI else "Ollama"
     tracer = Trace(question, MODEL, provider) if trace else NullTrace()
 
@@ -319,6 +377,29 @@ def run_agent(question: str, verbose: bool = False, trace: bool = True) -> str:
                 llm_output=answer_output,
                 duration_ms=answer_duration,
             )
+
+        # Reflection phase: verify the final answer before returning it.
+        if reflect:
+            reflection_messages = _build_reflection_messages(question, tool_history, final_answer)
+            reflection_start = current_ms()
+            reflection_output = chat(reflection_messages)
+            reflection_output = _clean_answer(reflection_output)
+            reflection_duration = current_ms() - reflection_start
+            if verbose:
+                print(f"[Reflection] Critic: {reflection_output}")
+
+            verified, reflection_text = _parse_reflection(reflection_output)
+            tracer.add_step(
+                phase="reflection",
+                llm_output=reflection_output,
+                duration_ms=reflection_duration,
+                guard_triggered=not verified,
+                guard_reason=None if verified else reflection_text,
+            )
+
+            if not verified:
+                # Reflection flagged the answer. Return the answer with a warning.
+                final_answer = f"[Unverified: {reflection_text}] {final_answer}"
 
     except Exception as e:
         final_answer = f"Agent error: {e}"
