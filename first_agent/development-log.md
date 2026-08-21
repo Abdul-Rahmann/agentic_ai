@@ -533,6 +533,64 @@ Because the local model answers correctly on the first attempt for this test sui
 
 ---
 
+## Experiment 6: Adding a Third Tool (Weather via Open-Meteo)
+
+**Date**: 2026-08-16  
+**Goal**: Add a third tool that calls a live external API, expanding the agent beyond local/static tools and testing multi-tool planning with real-world data.
+
+### What was added
+
+- New tool: `get_weather(city)` in `first_agent/math_agent.py`.
+  - Uses Open-Meteo geocoding and forecast APIs (no API key, stdlib `urllib` only).
+  - Converts WMO weather codes into short human-readable descriptions.
+  - Returns errors cleanly when a city is not found or the network fails.
+- Updated `TOOLS` dict and plan prompt with a weather example.
+- Expanded `first_agent/stress_test.py`:
+  - `WEATHER_QUESTIONS`: verify that a weather query contains expected substrings (e.g., `"Paris"`, `"°C"`).
+  - `WEATHER_MATH_QUESTIONS`: verify that combining a live weather value with math returns a numeric answer.
+  - Added `expect_number` flag to `run_single_test` for answers where only the presence of a number matters.
+
+### First external-tool issues
+
+| Symptom | Cause |
+|---|---|
+| Tests could not assert exact weather values | Real-world temperature and conditions change between runs. |
+| Risk of hanging on slow/flaky network | Open-Meteo is generally fast, but any external API call needs a timeout. |
+| City name could be ambiguous | Geocoding returns the best match; the response includes the resolved location for transparency. |
+
+### Fixes applied
+
+1. **Fuzzy assertions for weather**: check for expected substrings and numeric presence rather than exact values.
+2. **10-second timeout** on both geocoding and forecast HTTP requests.
+3. **Resolved location in the tool result** so the final answer is transparent about which city was used.
+4. **Plan prompt example** for weather so the local model knows how to format `get_weather` calls.
+
+### Stress test results with three tools
+
+```text
+Math questions:         23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:   2 /  2 passed
+Weather questions:     1 /  1 passed
+Weather + math:        1 /  1 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                31 / 31 passed (100%)
+Mean response time:    3.38s
+Max response time:     7.58s
+```
+
+The weather question adds one external API round-trip (geocoding + forecast), which increases mean latency slightly compared with purely local tools. The local model still plans the correct sequence: call `get_weather`, then either answer directly or feed the result into `calculate` for the weather+math case.
+
+### Key observations
+
+- Adding an external API tool does not require changing the core loop; the existing plan/answer/reflection structure handles it.
+- Live data requires tests that assert structure, not exact values.
+- Clean error handling in the tool prevents a single API failure from crashing the whole agent.
+- The weather+math question confirms the agent can chain heterogeneous tools (`get_weather` → `calculate`) in a single plan.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -561,6 +619,7 @@ Because the local model answers correctly on the first attempt for this test sui
 - [x] Add a reflection phase where a separate prompt verifies the answer before it is returned.
 - [x] Add structured logging so every run produces a JSON trace file for post-hoc analysis.
 - [x] Add an explicit retry loop when reflection flags an answer as incorrect.
-- [ ] Add a third tool (e.g., web search or code execution sandbox).
+- [x] Add a third tool (e.g., web search or code execution sandbox).
+- [ ] Add a fourth tool or capability (e.g., web search, sandboxed code execution, or persistent memory).
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
 - [ ] Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.

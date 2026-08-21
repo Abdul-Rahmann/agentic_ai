@@ -680,6 +680,46 @@ Because the local model answers correctly on the first attempt for this test sui
 
 ---
 
+### Experiment 6: Multi-Tool Agent with Live Weather Tool
+
+**Date**: 2026-08-16  
+**Location**: `first_agent/math_agent.py`, `first_agent/stress_test.py`  
+**Goal**: Add a third tool that calls an external API and verify the agent can combine it with existing tools in multi-step plans.
+
+**What was built**:
+- Added `get_weather(city)` tool using Open-Meteo (geocoding + current forecast, no API key).
+- Updated the plan prompt with a weather example.
+- Expanded the stress test with `WEATHER_QUESTIONS` and `WEATHER_MATH_QUESTIONS`.
+- Added `expect_number` flag to `run_single_test` for cases where only a numeric answer can be asserted (live weather + math).
+
+**Stress test results**:
+
+```text
+Math questions:         23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:   2 /  2 passed
+Weather questions:     1 /  1 passed
+Weather + math:        1 /  1 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                31 / 31 passed (100%)
+Mean response time:    3.38s
+Max response time:     7.58s
+```
+
+**Key observations**:
+- The existing plan/answer/reflection loop handled the new tool without structural changes.
+- Live data requires fuzzy test assertions (substrings, numeric presence) rather than exact values.
+- External API tools need timeouts and clean error handling to avoid crashing the agent.
+- Combining a live API value with math (`temperature in Paris plus 10`) confirms the agent can chain heterogeneous tools.
+
+**Next steps for this experiment**:
+- Add a fourth tool (web search, sandboxed code execution, or persistent memory).
+- Make tools configurable and add cost/budget-aware routing.
+- Test adversarial prompts and ambiguous multi-step tasks.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -712,6 +752,7 @@ Use this section to track future additions to the notes.
 | 2026-08-13 | Added structured tracing (`tracer.py`, `traces/`); every interactive run now writes a JSON trace; stress test disables tracing. |
 | 2026-08-13 | Added reflection/critic phase; `run_agent` now verifies answers with a separate prompt before returning; still 29/29 passing. |
 | 2026-08-16 | Added reflection retry loop with `max_retries`, cached tool results, and `test_retry.py`; stress test still 29/29 passing. |
+| 2026-08-16 | Added third tool `get_weather(city)` using Open-Meteo; expanded stress test to 31 cases (weather and weather+math); all 31 passing. |
 
 ---
 

@@ -4,7 +4,8 @@ This agent started as a simple math assistant and evolved into a multi-tool agen
 
 1. Evaluate math expressions with `calculate(expression)`.
 2. Read text files with `read_file(path)`.
-3. Combine both tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”*
+3. Fetch live weather with `get_weather(city)`.
+4. Combine tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”* or *“What is the temperature in Paris plus 10?”*
 
 It demonstrates the full agent loop with **tool selection, execution, and multi-turn planning**.
 
@@ -43,7 +44,7 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 - `math_agent.py` — the agent implementation
 - `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
-- `stress_test.py` — benchmark suite covering math, file reads, multi-step tasks, and non-math questions
+- `stress_test.py` — benchmark suite covering math, file reads, weather, multi-step tasks, and non-math questions
 - `test_retry.py` — unit-style test that exercises the reflection retry loop with a mocked LLM
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
@@ -73,6 +74,8 @@ Try questions like:
 - `What is in data/numbers.txt?`
 - `What is the sum of the numbers in data/numbers.txt?` (answer: `68`)
 - `What is the product of the numbers in data/numbers.txt?` (answer: `993600`)
+- `What is the weather in Paris?`
+- `What is the temperature in Paris plus 10?`
 - `What is the capital of France?`
 
 ## Run the stress test
@@ -81,7 +84,7 @@ Try questions like:
 python first_agent/stress_test.py
 ```
 
-The current suite covers 29 cases and passes all of them with `llama3.1:latest`.
+The current suite covers 31 cases and passes all of them with `llama3.1:latest`.
 
 ## Run with OpenAI (optional)
 
@@ -108,6 +111,10 @@ Evaluates a mathematical expression in a restricted Python environment. Supports
 ### `read_file(path)`
 
 Reads a text file relative to the `first_agent` directory. Paths outside this directory are blocked for safety.
+
+### `get_weather(city)`
+
+Fetches the current weather for a city using the [Open-Meteo](https://open-meteo.com/) API (no API key required). It geocodes the city name, retrieves the current forecast, and returns a short human-readable summary such as `Current weather in Paris, France: 15°C, partly cloudy.`
 
 ## Guards and reliability patterns
 
@@ -211,10 +218,13 @@ Traces are disabled during stress testing to keep the benchmark clean.
 5. Reflection adds a second layer of verification after the final answer synthesis.
 6. A retry loop that feeds the critic's reason back into the prompt enables self-correction, but only if the underlying tool results are reliable.
 7. Tracing turns opaque failures into replayable records.
+8. External API tools need timeouts, clear error messages, and test assertions that tolerate changing real-world data (e.g., current temperature).
 
 ## Next steps
 
-1. Add a third tool, such as a web search or a Python code execution sandbox.
+1. ~~Add a third tool, such as a web search or a Python code execution sandbox.~~ Done: added `get_weather(city)`.
 2. Evaluate the agent on longer, more ambiguous multi-step tasks.
 3. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
 4. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
+5. Add a fourth tool, such as web search or a sandboxed code executor.
+6. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).

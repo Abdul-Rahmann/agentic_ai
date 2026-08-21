@@ -65,6 +65,22 @@ NON_MATH_QUESTIONS = [
     ("What is your name?", None),
 ]
 
+# Weather questions. The actual temperature and conditions change, so we only
+# check that the response contains expected markers, not exact values.
+WEATHER_QUESTIONS = [
+    (
+        "What is the weather in Paris?",
+        ["Paris", "°C"],
+    ),
+]
+
+WEATHER_MATH_QUESTIONS = [
+    (
+        "What is the temperature in Paris plus 10?",
+        None,  # any numeric answer is acceptable; exact value depends on current weather
+    ),
+]
+
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -88,7 +104,7 @@ def values_equal(a, b, tolerance: float = 1e-6) -> bool:
     return a == b
 
 
-def run_single_test(question: str, expected=None, expected_substrings=None):
+def run_single_test(question: str, expected=None, expected_substrings=None, expect_number: bool = False):
     """Run one test and return pass/fail status and timing."""
     start = time.time()
     try:
@@ -112,6 +128,8 @@ def run_single_test(question: str, expected=None, expected_substrings=None):
         passed = actual is not None and values_equal(actual, expected)
     elif expected_substrings:
         passed = all(sub.lower() in answer.lower() for sub in expected_substrings)
+    elif expect_number:
+        passed = actual is not None
     else:
         # Non-math question with no explicit expected value: just check it answered.
         passed = bool(answer.strip()) and "tool" not in answer.lower()
@@ -173,6 +191,20 @@ def main():
         results.append(result)
         print_result(result)
 
+    # Weather questions.
+    print("\n--- Weather Questions ---\n")
+    for question, expected_substrings in WEATHER_QUESTIONS:
+        result = run_single_test(question, expected_substrings=expected_substrings)
+        results.append(result)
+        print_result(result)
+
+    # Weather + math questions.
+    print("\n--- Weather + Math Questions ---\n")
+    for question, _ in WEATHER_MATH_QUESTIONS:
+        result = run_single_test(question, expect_number=True)
+        results.append(result)
+        print_result(result)
+
     # Non-math questions.
     print("\n--- Non-Math Questions ---\n")
     for question, _ in NON_MATH_QUESTIONS:
@@ -193,12 +225,16 @@ def main():
     math_results = [r for r in results if r["question"] in [q for q, _ in MATH_QUESTIONS]]
     read_results = [r for r in results if r["question"] in [q for q, _ in READ_FILE_QUESTIONS]]
     multi_results = [r for r in results if r["question"] in [q for q, _ in MULTI_STEP_QUESTIONS]]
+    weather_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_QUESTIONS]]
+    weather_math_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_MATH_QUESTIONS]]
     non_math_results = [r for r in results if r["question"] in [q for q, _ in NON_MATH_QUESTIONS]]
     repeat_summary = repeat_results
 
     passed_math = sum(r["passed"] for r in math_results)
     passed_read = sum(r["passed"] for r in read_results)
     passed_multi = sum(r["passed"] for r in multi_results)
+    passed_weather = sum(r["passed"] for r in weather_results)
+    passed_weather_math = sum(r["passed"] for r in weather_math_results)
     passed_non_math = sum(r["passed"] for r in non_math_results)
     passed_repeat = sum(r["passed"] for r in repeat_summary)
 
@@ -213,6 +249,8 @@ def main():
     print(f"Math questions:       {passed_math} / {len(math_results)} passed")
     print(f"Read-file questions:  {passed_read} / {len(read_results)} passed")
     print(f"Multi-step questions: {passed_multi} / {len(multi_results)} passed")
+    print(f"Weather questions:    {passed_weather} / {len(weather_results)} passed")
+    print(f"Weather + math:       {passed_weather_math} / {len(weather_math_results)} passed")
     print(f"Non-math questions:   {passed_non_math} / {len(non_math_results)} passed")
     print(f"Repetition test:      {passed_repeat} / {len(repeat_summary)} passed")
     print(f"Total:                {total_passed} / {total} passed")

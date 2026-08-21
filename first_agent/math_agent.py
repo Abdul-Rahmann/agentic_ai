@@ -87,9 +87,80 @@ def read_file(path: str) -> str:
         return f"Error: {e}"
 
 
+def get_weather(city: str) -> str:
+    """Fetch current weather for a city using Open-Meteo (no API key required)."""
+    import urllib.request
+    import urllib.parse
+
+    try:
+        # Geocode the city.
+        encoded_city = urllib.parse.quote(city)
+        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_city}&count=1"
+        with urllib.request.urlopen(geo_url, timeout=10) as response:
+            geo_data = json.loads(response.read().decode("utf-8"))
+
+        results = geo_data.get("results")
+        if not results:
+            return f"Error: could not find weather data for '{city}'"
+
+        lat = results[0]["latitude"]
+        lon = results[0]["longitude"]
+        display_name = results[0].get("name", city)
+        country = results[0].get("country", "")
+        location = f"{display_name}, {country}" if country else display_name
+
+        # Fetch current weather.
+        weather_url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={lat}&longitude={lon}&current_weather=true"
+        )
+        with urllib.request.urlopen(weather_url, timeout=10) as response:
+            weather_data = json.loads(response.read().decode("utf-8"))
+
+        current = weather_data.get("current_weather", {})
+        temp = current.get("temperature")
+        code = current.get("weathercode")
+
+        description = _weather_code_to_description(code)
+        return f"Current weather in {location}: {temp}°C, {description}."
+    except Exception as e:
+        return f"Error: could not fetch weather for '{city}': {e}"
+
+
+def _weather_code_to_description(code: int | None) -> str:
+    """Convert an Open-Meteo weather code to a human-readable description."""
+    if code is None:
+        return "unknown"
+    descriptions = {
+        0: "clear sky",
+        1: "mainly clear",
+        2: "partly cloudy",
+        3: "overcast",
+        45: "fog",
+        48: "depositing rime fog",
+        51: "light drizzle",
+        53: "moderate drizzle",
+        55: "dense drizzle",
+        61: "light rain",
+        63: "moderate rain",
+        65: "heavy rain",
+        71: "light snow",
+        73: "moderate snow",
+        75: "heavy snow",
+        80: "light rain showers",
+        81: "moderate rain showers",
+        82: "violent rain showers",
+        95: "thunderstorm",
+        96: "thunderstorm with light hail",
+        99: "thunderstorm with heavy hail",
+    }
+    return descriptions.get(code, "unknown")
+
+
 TOOLS = {
     "calculate": calculate,
     "read_file": read_file,
+    "get_weather": get_weather,
 }
 
 
@@ -133,12 +204,15 @@ _PLAN_SYSTEM_PROMPT = """You are a helpful assistant. You have access to these t
 
 - calculate(expression): evaluates a mathematical expression and returns the result.
 - read_file(path): reads the contents of a text file within the project directory.
+- get_weather(city): fetches the current weather for a city.
 
 Rules:
 1. If you need to use a tool, respond with ONLY a JSON object in this exact format:
    {"tool": "calculate", "input": "<expression>"}
    or
    {"tool": "read_file", "input": "<path>"}
+   or
+   {"tool": "get_weather", "input": "<city>"}
 2. If you already have enough information to answer the user's question, respond with the final answer in plain text.
 3. Do NOT repeat a tool call you have already made. Use the result you already have.
 4. Do not include any explanation, code blocks, or markdown outside the JSON or the final answer.
@@ -161,6 +235,11 @@ Tool result: 12\n15\n23\n8\n2\n3\n5
 Assistant: {"tool": "calculate", "input": "12 + 15 + 23 + 8 + 2 + 3 + 5"}
 Tool result: 68
 Assistant: 68
+
+User: What is the weather in Paris?
+Assistant: {"tool": "get_weather", "input": "Paris"}
+Tool result: Current weather in Paris, France: 15°C, partly cloudy.
+Assistant: It is 15°C and partly cloudy in Paris.
 
 User: What is the capital of France?
 Assistant: Paris
