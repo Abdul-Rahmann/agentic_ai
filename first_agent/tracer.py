@@ -39,10 +39,12 @@ class Trace:
         duration_ms: int = 0,
         guard_triggered: bool = False,
         guard_reason: str | None = None,
+        attempt: int = 0,
     ):
         """Add one step to the trace."""
         step = {
             "step": len(self.steps) + 1,
+            "attempt": attempt,
             "phase": phase,
             "llm_output": llm_output,
             "tool_name": tool_name,

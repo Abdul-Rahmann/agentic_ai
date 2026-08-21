@@ -22,13 +22,21 @@ Observe result
 Re-plan or answer
     ↓
 Final answer synthesis
+    ↓
+Reflect / critic verifies answer
+    ↓
+(If incorrect: retry with feedback)
+    ↓
+Return final answer
 ```
 
-The agent uses a **tool loop** followed by a **final answer phase**:
+The agent uses a **tool loop** followed by **answer synthesis**, **reflection**, and **retry**:
 
 - **Tool loop**: repeatedly plans and executes tools until the model decides it has enough information.
 - **Final answer phase**: synthesizes the gathered tool results into a concise answer.
-- **Guards**: prevents infinite loops by blocking repeated tool calls and by returning clean errors when a tool fails.
+- **Reflection phase**: a critic prompt verifies the answer against the tool history and question.
+- **Retry loop**: if the critic flags the answer, the agent re-runs the plan/answer phase with the feedback, up to a configurable number of retries.
+- **Guards**: prevent infinite loops by blocking repeated tool calls and by returning clean errors when a tool fails.
 
 ## Files
 
@@ -36,6 +44,7 @@ The agent uses a **tool loop** followed by a **final answer phase**:
 - `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
 - `stress_test.py` — benchmark suite covering math, file reads, multi-step tasks, and non-math questions
+- `test_retry.py` — unit-style test that exercises the reflection retry loop with a mocked LLM
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
 
@@ -108,15 +117,40 @@ Reads a text file relative to the `first_agent` directory. Paths outside this di
 - **Expression normalization**: common math notation (`^`, `!`) is rewritten to valid Python before evaluation.
 - **Reflection / critic**: before returning the final answer, a separate prompt verifies it against the tool history. If it flags an issue, the answer is returned with an `[Unverified: ...]` warning.
 
-## Reflection
+## Reflection and retry
 
 After the final answer is generated, the agent runs a separate **critic** prompt that verifies the answer against the question and the tool history. This is a reflection / self-criticism step.
 
 - If the critic responds with `VERIFIED: <answer>`, the answer is returned as-is.
-- If the critic responds with `INCORRECT: <reason>`, the answer is returned with an `[Unverified: <reason>]` warning.
+- If the critic responds with `INCORRECT: <reason>`, the agent enters a retry loop.
+- During retry, the critic's feedback is added to the plan and answer prompts so the next attempt can correct the mistake.
+- The retry loop runs up to `max_retries` times (default: 2). If the answer is still unverified after all retries, it is returned with an `[Unverified after N retries: ...]` warning.
 - Reflection can be disabled by passing `reflect=False` to `run_agent`.
 
-This pattern catches cases where the final answer synthesis drifted from the tool results.
+This pattern catches cases where the final answer synthesis drifted from the tool results and attempts to self-correct.
+
+### Example retry output
+
+```text
+[Attempt 1]
+[Plan 1.1] Agent: {"tool": "calculate", "input": "15 * 23"}
+[Tool 1.1] calculate(15 * 23) = 345
+[Plan 1.2] Agent: 345
+[Answer 1] Agent: 340
+[Reflection 1] Critic: INCORRECT: the calculator returned 345, not 340
+[Retry] Reflection flagged: the calculator returned 345, not 340
+
+[Attempt 2]
+[Plan 2.1] Agent: {"tool": "calculate", "input": "15 * 23"}
+[Guard] Repeated tool call detected. Moving to answer phase.
+[Answer 2] Agent: 345
+[Reflection 2] Critic: VERIFIED: 345
+[Retry] Answer verified on attempt 2.
+
+Final result: 345
+```
+
+Run `python first_agent/test_retry.py` to execute this test.
 
 ## Observability
 
@@ -175,11 +209,12 @@ Traces are disabled during stress testing to keep the benchmark clean.
 3. Guards are essential for production-like reliability: they prevent infinite loops, catch tool failures, and block repeated calls.
 4. A deterministic tool (calculator, file reader) should do the actual work; the LLM decides which tool to use and when.
 5. Reflection adds a second layer of verification after the final answer synthesis.
-6. Tracing turns opaque failures into replayable records.
+6. A retry loop that feeds the critic's reason back into the prompt enables self-correction, but only if the underlying tool results are reliable.
+7. Tracing turns opaque failures into replayable records.
 
 ## Next steps
 
 1. Add a third tool, such as a web search or a Python code execution sandbox.
 2. Evaluate the agent on longer, more ambiguous multi-step tasks.
-3. Add an explicit retry path when reflection flags an answer as incorrect.
-4. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
+3. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
+4. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.

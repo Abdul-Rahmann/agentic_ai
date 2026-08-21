@@ -616,6 +616,70 @@ Reflection added roughly one extra LLM call per question, raising mean latency f
 
 ---
 
+### Experiment 5: Reflection Retry Loop
+
+**Date**: 2026-08-16  
+**Location**: `first_agent/math_agent.py`, `first_agent/test_retry.py`  
+**Goal**: Evolve reflection from a warning-only verifier into a self-correcting retry loop.
+
+**What was built**:
+- Added `max_retries` parameter to `run_agent` (default: 2).
+- Wrapped plan/answer/reflection in an outer attempt loop.
+- When reflection returns `INCORRECT: <reason>`, the reason is appended to `reflection_feedback` and included in the plan and answer prompts for the next attempt.
+- Tool results are cached across attempts via `tool_history`; tools are not re-executed on retry.
+- Traces record an `attempt` number per step so retry sequences are visible.
+- Added `test_retry.py`, which mocks the LLM to force a wrong answer on the first attempt and verifies the retry corrects it.
+
+**Why it matters**:
+- Reflection without retry only tells you something is wrong; retry turns the critic's feedback into action.
+- It demonstrates that the agent loop must be designed to support re-planning and that tool results should be deterministic/cacheable.
+- It is a concrete self-improvement pattern used in more advanced agent systems.
+
+**Example retry test output**:
+
+```text
+[Attempt 1]
+[Plan 1.1] Agent: {"tool": "calculate", "input": "15 * 23"}
+[Tool 1.1] calculate(15 * 23) = 345
+[Plan 1.2] Agent: 345
+[Answer 1] Agent: 340
+[Reflection 1] Critic: INCORRECT: the calculator returned 345, not 340
+[Retry] Reflection flagged: the calculator returned 345, not 340
+
+[Attempt 2]
+[Plan 2.1] Agent: {"tool": "calculate", "input": "15 * 23"}
+[Guard] Repeated tool call detected. Moving to answer phase.
+[Answer 2] Agent: 345
+[Reflection 2] Critic: VERIFIED: 345
+[Retry] Answer verified on attempt 2.
+
+Final result: 345
+```
+
+**Stress test results with reflection + retry**:
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                29 / 29 passed (100%)
+Mean response time:    3.08s
+Max response time:    7.51s
+```
+
+Because the local model answers correctly on the first attempt for this test suite, no retries were triggered. The retry mechanism is exercised by `test_retry.py` with a mocked LLM.
+
+**Key observations**:
+- Caching tool results across attempts is essential for efficiency and determinism.
+- The critic's feedback must be surfaced to the plan and answer prompts to have a corrective effect.
+- The existing guard against repeated tool calls naturally pushes the model toward re-synthesis on retry.
+- Retry only helps when the underlying tool results are trustworthy.
+- Traces now include an `attempt` field, making retry sequences auditable.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -647,6 +711,7 @@ Use this section to track future additions to the notes.
 | 2026-08-09 | Added more numbers (2, 3, 5) to `data/numbers.txt`; updated stress test expected values; still 29/29 passing. |
 | 2026-08-13 | Added structured tracing (`tracer.py`, `traces/`); every interactive run now writes a JSON trace; stress test disables tracing. |
 | 2026-08-13 | Added reflection/critic phase; `run_agent` now verifies answers with a separate prompt before returning; still 29/29 passing. |
+| 2026-08-16 | Added reflection retry loop with `max_retries`, cached tool results, and `test_retry.py`; stress test still 29/29 passing. |
 
 ---
 

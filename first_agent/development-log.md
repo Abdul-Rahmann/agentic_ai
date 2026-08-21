@@ -467,6 +467,72 @@ Reflection adds roughly one extra LLM call per question, which increases mean la
 
 ---
 
+## Experiment 5: Reflection Retry Loop
+
+**Date**: 2026-08-16  
+**Goal**: Evolve reflection from a warning-only verifier into a self-correcting retry loop.
+
+### What was built
+
+- Added `max_retries` parameter to `run_agent` (default: 2).
+- Wrapped the plan/answer/reflection sequence in an outer attempt loop.
+- When reflection returns `INCORRECT: <reason>`, the reason is appended to a `reflection_feedback` list.
+- `_build_plan_messages` and `_build_answer_messages` now include the reflection feedback so subsequent attempts can correct the mistake.
+- Tool results are cached across attempts via `tool_history`; tools are not re-executed on retry.
+- If the answer is still unverified after `max_retries`, it is returned with an `[Unverified after N retries: ...]` warning.
+- Traces record an `attempt` number for each step so the retry sequence is visible in the trace file.
+- Added `first_agent/test_retry.py`, a unit-style test that mocks the LLM chat function to force a wrong answer on the first attempt and verifies the retry corrects it.
+
+### Why it matters
+
+Reflection without retry only tells you that something is wrong. Retry turns the critic's feedback into action, which is a key self-improvement pattern in agentic AI. It also demonstrates that the loop structure and tool history must be designed to support re-planning.
+
+### Example retry test output
+
+```text
+[Attempt 1]
+[Plan 1.1] Agent: {"tool": "calculate", "input": "15 * 23"}
+[Tool 1.1] calculate(15 * 23) = 345
+[Plan 1.2] Agent: 345
+[Answer 1] Agent: 340
+[Reflection 1] Critic: INCORRECT: the calculator returned 345, not 340
+[Retry] Reflection flagged: the calculator returned 345, not 340
+
+[Attempt 2]
+[Plan 2.1] Agent: {"tool": "calculate", "input": "15 * 23"}
+[Guard] Repeated tool call detected. Moving to answer phase.
+[Answer 2] Agent: 345
+[Reflection 2] Critic: VERIFIED: 345
+[Retry] Answer verified on attempt 2.
+
+Final result: 345
+```
+
+### Stress test results with reflection + retry
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                29 / 29 passed (100%)
+Mean response time:    3.08s
+Max response time:    7.51s
+```
+
+Because the local model answers correctly on the first attempt for this test suite, no retries were triggered. The retry mechanism is exercised by `test_retry.py` with a mocked LLM.
+
+### Key observations
+
+- Caching tool results across attempts is essential for efficiency and determinism. Re-executing tools on retry could produce different results or side effects.
+- Including the critic's feedback in the plan and answer prompts gives the model a concrete correction signal.
+- The retry loop re-uses the existing guard against repeated tool calls, which naturally pushes the model toward re-synthesis rather than re-execution.
+- Retry only makes sense when the underlying tool results are trustworthy. If the tool itself is wrong, retry will not help.
+- Traces now include an `attempt` field, making it easy to see how many tries a question required.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -494,6 +560,7 @@ Reflection adds roughly one extra LLM call per question, which increases mean la
 - [x] Add a second tool (`read_file`) and practice multi-tool selection.
 - [x] Add a reflection phase where a separate prompt verifies the answer before it is returned.
 - [x] Add structured logging so every run produces a JSON trace file for post-hoc analysis.
+- [x] Add an explicit retry loop when reflection flags an answer as incorrect.
 - [ ] Add a third tool (e.g., web search or code execution sandbox).
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
-- [ ] Add an explicit retry loop when reflection flags an answer as incorrect.
+- [ ] Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.

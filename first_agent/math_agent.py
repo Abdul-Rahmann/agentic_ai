@@ -167,14 +167,19 @@ Assistant: Paris
 """
 
 
-def _build_plan_messages(question: str, tool_history: list) -> list:
-    """Build the messages for the planning step, including tool history."""
+def _build_plan_messages(question: str, tool_history: list, reflection_feedback: list) -> list:
+    """Build the messages for the planning step, including tool history and retry feedback."""
     content = _PLAN_SYSTEM_PROMPT
     if tool_history:
         content += "\n\nYou have already used tools. Here are the results:\n"
         for tool_name, tool_input, tool_result in tool_history:
             content += f"\n{tool_name}({tool_input}) -> {tool_result}"
         content += "\n\nIf you need another tool, use JSON. If you have enough information, answer directly."
+    if reflection_feedback:
+        content += "\n\nReflection feedback from previous attempts:\n"
+        for i, feedback in enumerate(reflection_feedback, 1):
+            content += f"\n  Attempt {i}: {feedback}"
+        content += "\n\nUse the feedback above to correct your answer."
 
     return [
         {"role": "system", "content": content},
@@ -182,12 +187,17 @@ def _build_plan_messages(question: str, tool_history: list) -> list:
     ]
 
 
-def _build_answer_messages(question: str, tool_history: list) -> list:
-    """Build the messages for the final answer step."""
+def _build_answer_messages(question: str, tool_history: list, reflection_feedback: list) -> list:
+    """Build the messages for the final answer step, including retry feedback."""
     content = "Use the tool results below to answer the question. Output ONLY the final answer in plain text, with no explanation.\n\n"
     content += "Tool results:\n"
     for tool_name, tool_input, tool_result in tool_history:
         content += f"\n  {tool_name}({tool_input}) -> {tool_result}"
+    if reflection_feedback:
+        content += "\n\nReflection feedback from previous attempts:\n"
+        for i, feedback in enumerate(reflection_feedback, 1):
+            content += f"\n  Attempt {i}: {feedback}"
+        content += "\n\nUse the feedback above to provide the correct final answer."
     content += f"\n\nQuestion: {question}\n\nFinal answer:"
 
     return [
@@ -271,135 +281,172 @@ def _parse_reflection(reflection_output: str) -> tuple[bool, str]:
     return True, text
 
 
-def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect: bool = True) -> str:
+def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect: bool = True, max_retries: int = 2) -> str:
     provider = "OpenAI" if USE_OPENAI else "Ollama"
     tracer = Trace(question, MODEL, provider) if trace else NullTrace()
 
     run_start = current_ms()
     tool_history = []
+    reflection_feedback = []
     final_answer = None
+    last_reflection_text = None
 
     try:
-        # Tool loop: plan and execute until no tool is needed.
-        for step in range(MAX_TOOL_STEPS):
-            plan_messages = _build_plan_messages(question, tool_history)
-            plan_start = current_ms()
-            plan_output = chat(plan_messages)
-            plan_duration = current_ms() - plan_start
-
+        for attempt in range(max_retries + 1):
             if verbose:
-                print(f"[Plan {step + 1}] Agent: {plan_output}")
+                print(f"\n[Attempt {attempt + 1}]")
 
-            tool_call = extract_json(plan_output)
+            tool_error = False
 
-            # No tool call: the model thinks it can answer directly.
-            if not tool_call or tool_call.get("tool") not in TOOLS:
-                if not tool_history:
-                    # No tools used yet; treat this as the direct answer.
-                    final_answer = _clean_answer(plan_output)
+            # Tool loop: plan and execute until no tool is needed.
+            for step in range(MAX_TOOL_STEPS):
+                plan_messages = _build_plan_messages(question, tool_history, reflection_feedback)
+                plan_start = current_ms()
+                plan_output = chat(plan_messages)
+                plan_duration = current_ms() - plan_start
+
+                if verbose:
+                    print(f"[Plan {attempt + 1}.{step + 1}] Agent: {plan_output}")
+
+                tool_call = extract_json(plan_output)
+
+                # No tool call: the model thinks it can answer directly.
+                if not tool_call or tool_call.get("tool") not in TOOLS:
+                    if not tool_history:
+                        # No tools used yet; treat this as the direct answer.
+                        final_answer = _clean_answer(plan_output)
+                        tracer.add_step(
+                            phase="direct_answer",
+                            llm_output=plan_output,
+                            duration_ms=plan_duration,
+                            attempt=attempt,
+                        )
+                        break
+                    # Tools were used; move to the final answer phase.
                     tracer.add_step(
-                        phase="direct_answer",
+                        phase="plan",
                         llm_output=plan_output,
                         duration_ms=plan_duration,
+                        guard_triggered=True,
+                        guard_reason="model answered directly after tool history; moving to answer phase",
+                        attempt=attempt,
                     )
                     break
-                # Tools were used; move to the final answer phase.
-                tracer.add_step(
-                    phase="plan",
-                    llm_output=plan_output,
-                    duration_ms=plan_duration,
-                    guard_triggered=True,
-                    guard_reason="model answered directly after tool history; moving to answer phase",
-                )
-                break
 
-            tool_name = tool_call["tool"]
-            tool_input = tool_call.get("input", "")
+                tool_name = tool_call["tool"]
+                tool_input = tool_call.get("input", "")
 
-            # Guard: do not repeat any tool call that already appears in history.
-            if any(name == tool_name and inp == tool_input for name, inp, _ in tool_history):
+                # Guard: do not repeat any tool call that already appears in history.
+                if any(name == tool_name and inp == tool_input for name, inp, _ in tool_history):
+                    if verbose:
+                        print(f"[Guard] Repeated tool call detected. Moving to answer phase.")
+                    tracer.add_step(
+                        phase="plan",
+                        llm_output=plan_output,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        duration_ms=plan_duration,
+                        guard_triggered=True,
+                        guard_reason="repeated tool call blocked",
+                        attempt=attempt,
+                    )
+                    break
+
+                tool_fn = TOOLS[tool_name]
+                tool_start = current_ms()
+                result = tool_fn(tool_input)
+                tool_duration = current_ms() - tool_start
+
                 if verbose:
-                    print(f"[Guard] Repeated tool call detected. Moving to answer phase.")
+                    print(f"[Tool {attempt + 1}.{step + 1}] {tool_name}({tool_input}) = {result}")
+
                 tracer.add_step(
                     phase="plan",
                     llm_output=plan_output,
                     tool_name=tool_name,
                     tool_input=tool_input,
-                    duration_ms=plan_duration,
-                    guard_triggered=True,
-                    guard_reason="repeated tool call blocked",
+                    tool_result=result,
+                    duration_ms=plan_duration + tool_duration,
+                    attempt=attempt,
                 )
-                break
 
-            tool_fn = TOOLS[tool_name]
-            tool_start = current_ms()
-            result = tool_fn(tool_input)
-            tool_duration = current_ms() - tool_start
+                if result.startswith("Error:"):
+                    if verbose:
+                        print(f"[Guard] Tool failed. Returning error message.")
+                    final_answer = f"I could not use {tool_name}. {result}"
+                    tool_error = True
+                    tracer.add_step(
+                        phase="error",
+                        llm_output="",
+                        guard_triggered=True,
+                        guard_reason=f"tool {tool_name} returned error",
+                        attempt=attempt,
+                    )
+                    break
 
-            if verbose:
-                print(f"[Tool {step + 1}] {tool_name}({tool_input}) = {result}")
+                tool_history.append((tool_name, tool_input, result))
 
-            tracer.add_step(
-                phase="plan",
-                llm_output=plan_output,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                tool_result=result,
-                duration_ms=plan_duration + tool_duration,
-            )
-
-            if result.startswith("Error:"):
+            # Final answer phase: synthesize the gathered information.
+            if final_answer is None:
+                answer_messages = _build_answer_messages(question, tool_history, reflection_feedback)
+                answer_start = current_ms()
+                answer_output = chat(answer_messages)
+                answer_duration = current_ms() - answer_start
+                answer_output = _clean_answer(answer_output)
                 if verbose:
-                    print(f"[Guard] Tool failed. Returning error message.")
-                final_answer = f"I could not use {tool_name}. {result}"
+                    print(f"[Answer {attempt + 1}] Agent: {answer_output}")
+                final_answer = answer_output
                 tracer.add_step(
-                    phase="error",
-                    llm_output="",
-                    guard_triggered=True,
-                    guard_reason=f"tool {tool_name} returned error",
+                    phase="answer",
+                    llm_output=answer_output,
+                    duration_ms=answer_duration,
+                    attempt=attempt,
                 )
+
+            # If a tool failed, do not reflect or retry; just return the error.
+            if tool_error:
                 break
 
-            tool_history.append((tool_name, tool_input, result))
+            # Reflection phase: verify the final answer before returning it.
+            if reflect:
+                reflection_messages = _build_reflection_messages(question, tool_history, final_answer)
+                reflection_start = current_ms()
+                reflection_output = chat(reflection_messages)
+                reflection_output = _clean_answer(reflection_output)
+                reflection_duration = current_ms() - reflection_start
+                if verbose:
+                    print(f"[Reflection {attempt + 1}] Critic: {reflection_output}")
 
-        # Final answer phase: synthesize the gathered information.
-        if final_answer is None:
-            answer_messages = _build_answer_messages(question, tool_history)
-            answer_start = current_ms()
-            answer_output = chat(answer_messages)
-            answer_duration = current_ms() - answer_start
-            answer_output = _clean_answer(answer_output)
-            if verbose:
-                print(f"[Answer] Agent: {answer_output}")
-            final_answer = answer_output
-            tracer.add_step(
-                phase="answer",
-                llm_output=answer_output,
-                duration_ms=answer_duration,
-            )
+                verified, reflection_text = _parse_reflection(reflection_output)
+                last_reflection_text = reflection_text
+                tracer.add_step(
+                    phase="reflection",
+                    llm_output=reflection_output,
+                    duration_ms=reflection_duration,
+                    guard_triggered=not verified,
+                    guard_reason=None if verified else reflection_text,
+                    attempt=attempt,
+                )
 
-        # Reflection phase: verify the final answer before returning it.
-        if reflect:
-            reflection_messages = _build_reflection_messages(question, tool_history, final_answer)
-            reflection_start = current_ms()
-            reflection_output = chat(reflection_messages)
-            reflection_output = _clean_answer(reflection_output)
-            reflection_duration = current_ms() - reflection_start
-            if verbose:
-                print(f"[Reflection] Critic: {reflection_output}")
+                if verified:
+                    if verbose:
+                        print(f"[Retry] Answer verified on attempt {attempt + 1}.")
+                    break
 
-            verified, reflection_text = _parse_reflection(reflection_output)
-            tracer.add_step(
-                phase="reflection",
-                llm_output=reflection_output,
-                duration_ms=reflection_duration,
-                guard_triggered=not verified,
-                guard_reason=None if verified else reflection_text,
-            )
+                # Reflection flagged the answer. Add feedback and retry.
+                reflection_feedback.append(reflection_text)
+                if verbose:
+                    print(f"[Retry] Reflection flagged: {reflection_text}")
 
-            if not verified:
-                # Reflection flagged the answer. Return the answer with a warning.
-                final_answer = f"[Unverified: {reflection_text}] {final_answer}"
+                if attempt < max_retries:
+                    # Reset final_answer so the next attempt re-runs the answer phase.
+                    final_answer = None
+                else:
+                    # No more retries. Return the answer with a warning.
+                    final_answer = f"[Unverified after {max_retries} retries: {reflection_text}] {final_answer}"
+            else:
+                # Reflection disabled; accept the first answer.
+                break
 
     except Exception as e:
         final_answer = f"Agent error: {e}"
