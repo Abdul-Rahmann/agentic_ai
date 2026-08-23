@@ -46,8 +46,9 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 - `math_agent.py` — the agent implementation
 - `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
-- `stress_test.py` — benchmark suite covering math, file reads, weather, web search, multi-step tasks, and non-math questions
+- `stress_test.py` — benchmark suite covering math, file reads, weather, web search, date, multi-step tasks, and non-math questions
 - `test_retry.py` — unit-style test that exercises the reflection retry loop with a mocked LLM
+- `trace_analyzer.py` — report generator that reads trace JSON files and summarizes latency, tool usage, guards, and failures
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
 
@@ -89,6 +90,26 @@ python first_agent/stress_test.py
 ```
 
 The current suite covers 34 cases and passes all of them with `llama3.1:latest`.
+
+## Analyze traces
+
+Every interactive run writes a JSON trace to `first_agent/traces/`. To summarize those traces:
+
+```bash
+python first_agent/trace_analyzer.py
+```
+
+Add flags to drill in:
+
+```bash
+python first_agent/trace_analyzer.py --last 20        # last 20 traces only
+python first_agent/trace_analyzer.py --since 2026-08-20  # traces from a date onward
+python first_agent/trace_analyzer.py --slowest         # list the 5 slowest runs
+python first_agent/trace_analyzer.py --failed          # list errors / unverified answers
+python first_agent/trace_analyzer.py --slowest --failed  # both
+```
+
+The report shows total traces, duration stats, time per phase, tool usage, guard reasons, errors, unverified answers, retries, and slowest/failed runs.
 
 ## Run with OpenAI (optional)
 
@@ -237,13 +258,14 @@ Traces are disabled during stress testing to keep the benchmark clean.
 10. Free search APIs (DuckDuckGo Instant Answer, Wikipedia) cover factual/entity queries but not real-time data. A hybrid fallback (DuckDuckGo → Wikipedia) improves coverage without adding keys.
 11. The reflection critic must be told explicitly to trust live external tool results over its own training knowledge, otherwise it will reject current facts with hallucinated cutoff dates.
 12. Some "current" questions (today's date, exact time) are better served by a dedicated deterministic tool than by any search engine.
+13. A trace analyzer turns a folder of JSON traces into actionable metrics: duration per phase, tool usage, guard frequency, and common failure patterns.
 
 ## Next steps
 
 1. ~~Add a third tool, such as a web search or a Python code execution sandbox.~~ Done: added `get_weather(city)`.
 2. ~~Add a fourth tool, such as web search or a sandboxed code executor.~~ Done: added `web_search(query)` (DuckDuckGo + Wikipedia fallback).
 3. ~~Add a date/time tool so "today's date" works reliably without relying on search.~~ Done: added `get_current_date()`.
-4. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
-5. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
+4. ~~Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.~~ Done: added `trace_analyzer.py`.
+5. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
 6. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
 7. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).

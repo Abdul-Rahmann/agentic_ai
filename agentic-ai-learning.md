@@ -720,6 +720,121 @@ Max response time:     7.58s
 
 ---
 
+### Experiment 7: Four-Tool Agent with Hybrid Web Search
+
+**Date**: 2026-08-21 / updated 2026-08-22  
+**Location**: `first_agent/math_agent.py`, `first_agent/stress_test.py`  
+**Goal**: Add a general knowledge retrieval tool and verify the agent can route among four distinct tools. Then fix reliability issues by switching to a DuckDuckGo-first + Wikipedia-fallback search and tightening the reflection prompt.
+
+**What was built**:
+- Added `web_search(query)` tool using DuckDuckGo Instant Answer first, falling back to Wikipedia (no API key, stdlib `urllib`, in-process cache, query variants).
+- Updated the plan prompt with a web-search example and reinforced the existing product example after a regression.
+- Added `WEB_SEARCH_QUESTIONS` to the stress test using substring assertions.
+- Updated the reflection prompt with an explicit rule to trust live external tool results over training knowledge.
+
+**Stress test results**:
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Weather questions:     1 /  1 passed
+Weather + math:        1 /  1 passed
+Web search questions:  1 /  1 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                32 / 32 passed (100%)
+Mean response time:    3.91s
+Max response time:     7.10s
+```
+
+**Key observations**:
+- The same loop handled a fourth tool type without structural changes.
+- Free APIs need rate-limit awareness: cache, timeout, polite user-agent, and fuzzy test assertions.
+- Adding tools makes the plan prompt longer, which can weaken existing examples. Re-adding a targeted few-shot example fixed the product regression.
+- DuckDuckGo Instant Answer is great for factual/entity queries (e.g., "President of Ghana") but cannot answer real-time questions like "today's date".
+- Wikipedia fallback is essential for coverage on queries DuckDuckGo misses (e.g., "CEO of OpenAI", "Who wrote Hamlet").
+- The reflection critic must be told explicitly to trust live tool results; otherwise it invents training-data cutoffs and rejects correct current facts.
+
+**Next steps for this experiment**:
+- Add a dedicated date/time tool for real-time date questions.
+- Add search+math multi-step questions (e.g., population of France divided by 10).
+- Build a trace analyzer script.
+- Make tool selection configurable and add cost/budget-aware routing.
+- Test adversarial and ambiguous prompts.
+
+---
+
+### Experiment 8: Five-Tool Agent with Current Date
+
+**Date**: 2026-08-23  
+**Location**: `first_agent/math_agent.py`, `first_agent/stress_test.py`  
+**Goal**: Add a deterministic date tool and verify the agent uses it for real-time date questions instead of unreliable search.
+
+**What was built**:
+- Added `get_current_date()` tool using Python's `datetime` (no network, no key).
+- Updated plan prompt with a date example.
+- Added `DATE_QUESTIONS` to the stress test with runtime-generated expected substrings.
+
+**Stress test results**:
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Weather questions:    1 /  1 passed
+Weather + math:       1 /  1 passed
+Web search questions:  1 /  1 passed
+Date questions:        2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                34 / 34 passed (100%)
+Mean response time:    4.34s
+Max response time:    11.75s
+```
+
+**Key observations**:
+- Not every real-time question should be solved by search; a cheap deterministic tool is often better.
+- The model correctly routed date questions to `get_current_date()` after adding a clear plan-prompt example.
+- Stress-test assertions for date must be generated at runtime because the expected value changes daily.
+
+**Next steps for this experiment**:
+- Add a `get_current_time()` tool for exact clock time.
+- Add search+math multi-step questions.
+- ~~Build a trace analyzer script.~~ Done.
+- Make tool selection configurable and add budget-aware routing.
+
+---
+
+### Experiment 9: Trace Analyzer
+
+**Date**: 2026-08-23  
+**Location**: `first_agent/trace_analyzer.py`, `first_agent/traces/`  
+**Goal**: Turn JSON trace files into an actionable observability report.
+
+**What was built**:
+- Added `trace_analyzer.py` that reads `first_agent/traces/*.json`.
+- Reports duration stats, per-phase latency, tool usage, guard events, errors, unverified answers, and retries.
+- Supports filters: `--last N`, `--since YYYY-MM-DD`, `--slowest`, `--failed`.
+
+**Sample findings from the first run**:
+- 36 traces spanning 10 days.
+- 6 unverified answers, all from "Who is the president of ..." questions before the reflection prompt was fixed.
+- `plan` phase dominates both in count and max latency.
+- `get_weather` was the most-used tool in the corpus.
+
+**Key observations**:
+- Observability is more than logging — it is turning logs into metrics.
+- A small analyzer script makes failure patterns visible without opening individual JSON files.
+- Guard-event summaries reveal where the model struggles (e.g., repeated tool calls, incorrect synthesis).
+
+**Next steps for this experiment**:
+- Add pass/fail classification if expected answers are added to traces.
+- Add cost estimation (per-provider token counts) when available.
+- Export the report to markdown or JSON for CI integration.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -753,6 +868,10 @@ Use this section to track future additions to the notes.
 | 2026-08-13 | Added reflection/critic phase; `run_agent` now verifies answers with a separate prompt before returning; still 29/29 passing. |
 | 2026-08-16 | Added reflection retry loop with `max_retries`, cached tool results, and `test_retry.py`; stress test still 29/29 passing. |
 | 2026-08-16 | Added third tool `get_weather(city)` using Open-Meteo; expanded stress test to 31 cases (weather and weather+math); all 31 passing. |
+| 2026-08-21 | Added fourth tool `web_search(query)` using Wikipedia API; expanded stress test to 32 cases; all 32 passing. |
+| 2026-08-22 | Switched `web_search` to DuckDuckGo Instant Answer with Wikipedia fallback; fixed reflection prompt to trust live tool results; stress test still 32/32. |
+| 2026-08-23 | Added fifth tool `get_current_date()`; expanded stress test to 34 cases; all 34 passing. |
+| 2026-08-23 | Added `trace_analyzer.py` to summarize trace files into latency, tool usage, guard, and reliability reports. |
 
 ---
 

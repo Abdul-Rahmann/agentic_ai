@@ -738,6 +738,75 @@ Max response time:    11.75s
 
 ---
 
+## Experiment 9: Trace Analyzer
+
+**Date**: 2026-08-23  
+**Goal**: Turn the growing collection of JSON trace files into a useful observability report: latency, tool usage, guard events, errors, unverified answers, and retries.
+
+### What was built
+
+- New module: `first_agent/trace_analyzer.py`.
+  - Reads every JSON trace in `first_agent/traces/`.
+  - Reports total traces, date range, and duration statistics (mean, median, min, max, total).
+  - Breaks down duration by phase (`plan`, `answer`, `reflection`, `direct_answer`, `error`).
+  - Counts tool usage frequency.
+  - Counts and lists guard-trigger reasons.
+  - Reports errors, unverified answers, and retry counts.
+  - Optional flags: `--last N`, `--since YYYY-MM-DD`, `--slowest`, `--failed`.
+
+### Sample output
+
+```text
+======================================================================
+TRACE ANALYZER REPORT
+======================================================================
+Total traces: 36
+Date range:   2026-08-13T13:10:46.597319+00:00 -> 2026-08-23T12:11:12.698160+00:00
+
+----------------------------------------------------------------------
+DURATION
+----------------------------------------------------------------------
+Mean:   6.84s
+Median: 6.14s
+Min:    1.05s
+Max:    17.84s
+Total:  246.30s
+
+----------------------------------------------------------------------
+DURATION BY PHASE
+----------------------------------------------------------------------
+  answer          mean=0.73s  median=0.62s  max=1.83s  n=47
+  direct_answer   mean=0.98s  median=0.83s  max=1.74s  n=3
+  error           mean=0.00s  median=0.00s  max=0.00s  n=2
+  plan            mean=1.77s  median=1.24s  max=10.58s  n=90
+  reflection      mean=1.07s  median=1.01s  max=2.58s  n=46
+
+----------------------------------------------------------------------
+TOOL USAGE
+----------------------------------------------------------------------
+  get_weather          27
+  calculate            17
+  web_search           16
+  read_file             7
+  get_current_date      1
+
+----------------------------------------------------------------------
+RELIABILITY
+----------------------------------------------------------------------
+  Errors:             0
+  Unverified answers: 6
+  Retries observed:   9
+```
+
+### Key observations
+
+- The analyzer immediately surfaced 6 unverified answers from earlier experiments (before the reflection prompt was fixed). All were "Who is the president of ..." questions.
+- `plan` is the dominant phase both in count and in max latency, which makes sense because the tool loop calls `plan` repeatedly.
+- `get_weather` is the most-used tool in the trace corpus because weather questions were tested heavily.
+- The `--slowest` and `--failed` flags make it easy to find outliers without manually opening JSON files.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
