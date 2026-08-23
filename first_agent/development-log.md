@@ -591,6 +591,105 @@ The weather question adds one external API round-trip (geocoding + forecast), wh
 
 ---
 
+## Experiment 7: Fourth Tool — Web Search via Wikipedia
+
+**Date**: 2026-08-21  
+**Goal**: Add a fourth tool that performs general knowledge retrieval, extending the agent from local files, weather, and math into web-scale search.
+
+### What was added
+
+- New tool: `web_search(query)` in `first_agent/math_agent.py`.
+  - Uses the Wikipedia search and extracts APIs (no API key, stdlib `urllib` only).
+  - Searches for the most relevant article, fetches a short intro extract, and returns a compact text summary.
+  - Includes an in-process cache and a polite 0.3s delay to avoid hammering the API.
+  - Handles HTTP errors and empty results cleanly.
+- Updated `TOOLS` dict and plan prompt with a web-search example.
+- Added `WEB_SEARCH_QUESTIONS` to `first_agent/stress_test.py`, using substring assertions because Wikipedia content can change.
+
+### First issues with the new tool
+
+| Symptom | Cause |
+|---|---|
+| `Who is the CEO of OpenAI?` answer was correct but test failed | Assertion expected both `"Sam Altman"` and `"OpenAI"` in the answer; the model only emitted `"Sam Altman"`. |
+| Adding the fourth tool made the plan prompt longer | The previously passing product question (`What is the product of the numbers in data/numbers.txt?`) started failing because the model tried to compute the product in its head and answered `720`. |
+| Wikipedia API rate-limiting during manual exploration | Rapid repeated calls from exploratory scripts triggered HTTP 429 errors. |
+
+### Fixes applied
+
+1. **Relaxed web-search test assertion**: check for `"Sam Altman"` only, which is the factual core the question asks for.
+2. **Added a product example to the plan prompt**: reinforced that arithmetic over file contents must use `calculate`, not mental math.
+3. **Cache and delay in `web_search`**: avoid repeated identical requests and reduce the risk of rate limits.
+4. **Clear error messages** for HTTP failures so the agent returns something useful instead of crashing.
+
+### Stress test results with four tools
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Weather questions:     1 /  1 passed
+Weather + math:        1 /  1 passed
+Web search questions:  1 /  1 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                32 / 32 passed (100%)
+Mean response time:    4.21s
+Max response time:     8.19s
+```
+
+The web-search test adds a Wikipedia API round-trip, so it is one of the slower cases. The overall suite still passes completely.
+
+### Key observations
+
+- Each new tool increases the plan prompt size, which can make existing multi-step examples less salient. Re-adding or reinforcing examples for fragile cases is a cheap fix.
+- Free APIs (Wikipedia, Open-Meteo) are great for learning, but they need rate-limit awareness: cache, delay, timeouts, and polite user-agent strings.
+- Web search results change, so tests should assert stable structure (names, units, numeric presence) rather than exact text.
+- The same loop architecture scales to four distinct tool types: deterministic math, local file I/O, live weather, and knowledge retrieval.
+
+---
+
+## Experiment 7 Update: Hybrid Web Search (DuckDuckGo + Wikipedia)
+
+**Date**: 2026-08-22  
+**Goal**: Fix the unreliable Wikipedia-only `web_search` by switching to DuckDuckGo Instant Answer first and falling back to Wikipedia, and correct the reflection critic so it stops hallucinating training cutoffs for live tool results.
+
+### What was changed
+
+- Replaced the Wikipedia-only `web_search(query)` with a **hybrid search**:
+  - First calls the DuckDuckGo Instant Answer API (`https://api.duckduckgo.com/?q=...&format=json`).
+  - Tries multiple query variants (strips prefixes like `current`, `who is`, `what is`, etc.) when the first attempt is empty.
+  - Falls back to Wikipedia if DuckDuckGo has no result.
+  - Keeps the in-process cache and returns clean errors.
+- Updated the reflection prompt with an explicit rule: **trust live external tool results (weather, web search) over the model's own training knowledge**.
+
+### Why the change was needed
+
+- Wikipedia articles can be stale or omit current details.
+- The reflection critic repeatedly rejected correct current facts (e.g., "John Mahama is the president of Ghana") with invented "training data cutoff" reasoning.
+- DuckDuckGo Instant Answer alone was too narrow: it handled "President of Ghana" but failed on "CEO of OpenAI" and "Who wrote Hamlet?". Wikipedia covered those gaps.
+
+### Stress test results after the update
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Weather questions:    1 /  1 passed
+Weather + math:       1 /  1 passed
+Web search questions:  1 /  1 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                32 / 32 passed (100%)
+Mean response time:    3.91s
+Max response time:     7.10s
+```
+
+### Remaining limitation
+
+DuckDuckGo Instant Answer is not a real-time search engine. Queries like *"What date is today?"* either return no result or return stale/cached data. A dedicated `get_date()` tool or a paid live-search API (Tavily, Serper, etc.) is still needed for date/time and breaking-news questions.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -620,6 +719,6 @@ The weather question adds one external API round-trip (geocoding + forecast), wh
 - [x] Add structured logging so every run produces a JSON trace file for post-hoc analysis.
 - [x] Add an explicit retry loop when reflection flags an answer as incorrect.
 - [x] Add a third tool (e.g., web search or code execution sandbox).
-- [ ] Add a fourth tool or capability (e.g., web search, sandboxed code execution, or persistent memory).
+- [x] Add a fourth tool or capability (e.g., web search, sandboxed code execution, or persistent memory).
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
 - [ ] Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.

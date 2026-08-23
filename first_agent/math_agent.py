@@ -1,5 +1,5 @@
 """
-Multi-tool agent: a math assistant that can also read files.
+Multi-tool agent: a math assistant that can also read files and search the web.
 
 This evolves the two-phase design into a general tool loop:
 
@@ -11,6 +11,8 @@ This evolves the two-phase design into a general tool loop:
 Tools:
   - calculate(expression): evaluates a mathematical expression.
   - read_file(path): reads a text file within the project directory.
+  - get_weather(city): fetches the current weather for a city.
+  - web_search(query): searches DuckDuckGo Instant Answer for a query and returns a summary.
 
 Runs locally with Ollama (llama3.1). Set USE_OPENAI=1 to use OpenAI instead.
 """
@@ -157,10 +159,113 @@ def _weather_code_to_description(code: int | None) -> str:
     return descriptions.get(code, "unknown")
 
 
+_WEB_SEARCH_CACHE: dict[str, str] = {}
+
+
+def web_search(query: str) -> str:
+    """Search DuckDuckGo Instant Answer API and fall back to Wikipedia."""
+    import html as html_module
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    if query in _WEB_SEARCH_CACHE:
+        return _WEB_SEARCH_CACHE[query]
+
+    user_agent = "Mozilla/5.0 (learning-agent/1.0; contact localhost)"
+
+    def _ddg_lookup(q: str):
+        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(q)}&format=json"
+        req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _extract_ddg(data: dict) -> str:
+        abstract = data.get("AbstractText", "").strip()
+        answer = data.get("Answer", "").strip()
+        heading = data.get("Heading", "").strip()
+        if abstract:
+            return abstract
+        if answer:
+            return answer
+        if heading and heading.lower() != "today" and heading.lower() != "date":
+            # "Today"/"Date" headings are usually disambiguation pages, not answers.
+            return heading
+        return ""
+
+    def _wikipedia_lookup(q: str) -> str:
+        search_url = (
+            "https://en.wikipedia.org/w/api.php?"
+            "action=query&list=search&format=json&origin=*"
+            f"&srsearch={urllib.parse.quote(q)}&srlimit=1"
+        )
+        req = urllib.request.Request(search_url, headers={"User-Agent": user_agent})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            search_data = json.loads(response.read().decode("utf-8"))
+        results = search_data.get("query", {}).get("search", [])
+        if not results:
+            return ""
+        title = results[0]["title"]
+        snippet = html_module.unescape(re.sub(r"<[^>]+>", "", results[0].get("snippet", "")))
+        extract_url = (
+            "https://en.wikipedia.org/w/api.php?"
+            "action=query&prop=extracts&exintro&explaintext&format=json&origin=*"
+            f"&titles={urllib.parse.quote(title)}"
+        )
+        req = urllib.request.Request(extract_url, headers={"User-Agent": user_agent})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            extract_data = json.loads(response.read().decode("utf-8"))
+        pages = extract_data.get("query", {}).get("pages", {})
+        for page in pages.values():
+            extract = page.get("extract", "")
+            if extract:
+                return f"Wikipedia '{title}': {extract.strip()[:800].replace(chr(10), ' ')}"
+        if snippet:
+            return f"Wikipedia '{title}': {snippet.strip()[:500]}"
+        return ""
+
+    try:
+        # Build a list of query variants to try.
+        variants = [query]
+        normalized = query.lower().strip("?")
+        for prefix in ("current ", "today's ", "the ", "who is ", "what is ", "who are ", "what are ", "who was ", "what was "):
+            if normalized.startswith(prefix):
+                variants.append(normalized[len(prefix):].strip())
+        for phrase in (" who is ", " what is ", " who are ", " what are ", " the ", " current "):
+            if phrase in normalized:
+                variants.append(normalized.replace(phrase, " ").strip())
+
+        # Try DuckDuckGo first for clean instant answers.
+        for variant in variants:
+            if not variant:
+                continue
+            data = _ddg_lookup(variant)
+            result = _extract_ddg(data)
+            if result:
+                _WEB_SEARCH_CACHE[query] = result
+                return result
+
+        # Fall back to Wikipedia for broader coverage.
+        for variant in variants:
+            if not variant:
+                continue
+            result = _wikipedia_lookup(variant)
+            if result:
+                _WEB_SEARCH_CACHE[query] = result
+                return result
+
+        return f"Error: no web search result for '{query}'"
+    except urllib.error.HTTPError as e:
+        return f"Error: search API returned {e.code} for '{query}'. Try again in a moment."
+    except Exception as e:
+        return f"Error: web search failed for '{query}': {e}"
+
+
 TOOLS = {
     "calculate": calculate,
     "read_file": read_file,
     "get_weather": get_weather,
+    "web_search": web_search,
 }
 
 
@@ -205,6 +310,7 @@ _PLAN_SYSTEM_PROMPT = """You are a helpful assistant. You have access to these t
 - calculate(expression): evaluates a mathematical expression and returns the result.
 - read_file(path): reads the contents of a text file within the project directory.
 - get_weather(city): fetches the current weather for a city.
+- web_search(query): searches DuckDuckGo Instant Answer for a query and returns a short summary.
 
 Rules:
 1. If you need to use a tool, respond with ONLY a JSON object in this exact format:
@@ -213,6 +319,8 @@ Rules:
    {"tool": "read_file", "input": "<path>"}
    or
    {"tool": "get_weather", "input": "<city>"}
+   or
+   {"tool": "web_search", "input": "<query>"}
 2. If you already have enough information to answer the user's question, respond with the final answer in plain text.
 3. Do NOT repeat a tool call you have already made. Use the result you already have.
 4. Do not include any explanation, code blocks, or markdown outside the JSON or the final answer.
@@ -236,10 +344,22 @@ Assistant: {"tool": "calculate", "input": "12 + 15 + 23 + 8 + 2 + 3 + 5"}
 Tool result: 68
 Assistant: 68
 
+User: What is the product of the numbers in data/numbers.txt?
+Assistant: {"tool": "read_file", "input": "data/numbers.txt"}
+Tool result: 12\n15\n23\n8\n2\n3\n5
+Assistant: {"tool": "calculate", "input": "12 * 15 * 23 * 8 * 2 * 3 * 5"}
+Tool result: 993600
+Assistant: 993600
+
 User: What is the weather in Paris?
 Assistant: {"tool": "get_weather", "input": "Paris"}
 Tool result: Current weather in Paris, France: 15°C, partly cloudy.
 Assistant: It is 15°C and partly cloudy in Paris.
+
+User: Who is the CEO of OpenAI?
+Assistant: {"tool": "web_search", "input": "CEO of OpenAI"}
+Tool result: Wikipedia 'OpenAI': OpenAI is an American artificial intelligence (AI) research organization...
+Assistant: Sam Altman is the CEO of OpenAI.
 
 User: What is the capital of France?
 Assistant: Paris
@@ -310,7 +430,8 @@ Rules:
 2. If the proposed answer is incorrect or unsupported, respond with ONLY:
    INCORRECT: <reason>
 3. If there is no tool history, verify the answer based on general knowledge.
-4. Do not include any explanation, code, or markdown outside the required format.
+4. Trust live external tool results over your own training knowledge. If the tool history includes a result from an external API such as get_weather or web_search, treat that result as authoritative — do not reject it because of a training-data cutoff or because it contradicts what you previously knew.
+5. Do not include any explanation, code, or markdown outside the required format.
 
 Examples:
 

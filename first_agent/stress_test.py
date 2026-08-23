@@ -81,6 +81,15 @@ WEATHER_MATH_QUESTIONS = [
     ),
 ]
 
+# Web search questions. Wikipedia content can change, so we check for expected
+# substrings rather than exact values.
+WEB_SEARCH_QUESTIONS = [
+    (
+        "Who is the CEO of OpenAI?",
+        ["Sam Altman"],
+    ),
+]
+
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -205,6 +214,13 @@ def main():
         results.append(result)
         print_result(result)
 
+    # Web search questions.
+    print("\n--- Web Search Questions ---\n")
+    for question, expected_substrings in WEB_SEARCH_QUESTIONS:
+        result = run_single_test(question, expected_substrings=expected_substrings)
+        results.append(result)
+        print_result(result)
+
     # Non-math questions.
     print("\n--- Non-Math Questions ---\n")
     for question, _ in NON_MATH_QUESTIONS:
@@ -227,6 +243,7 @@ def main():
     multi_results = [r for r in results if r["question"] in [q for q, _ in MULTI_STEP_QUESTIONS]]
     weather_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_QUESTIONS]]
     weather_math_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_MATH_QUESTIONS]]
+    web_search_results = [r for r in results if r["question"] in [q for q, _ in WEB_SEARCH_QUESTIONS]]
     non_math_results = [r for r in results if r["question"] in [q for q, _ in NON_MATH_QUESTIONS]]
     repeat_summary = repeat_results
 
@@ -235,6 +252,7 @@ def main():
     passed_multi = sum(r["passed"] for r in multi_results)
     passed_weather = sum(r["passed"] for r in weather_results)
     passed_weather_math = sum(r["passed"] for r in weather_math_results)
+    passed_web_search = sum(r["passed"] for r in web_search_results)
     passed_non_math = sum(r["passed"] for r in non_math_results)
     passed_repeat = sum(r["passed"] for r in repeat_summary)
 
@@ -251,6 +269,7 @@ def main():
     print(f"Multi-step questions: {passed_multi} / {len(multi_results)} passed")
     print(f"Weather questions:    {passed_weather} / {len(weather_results)} passed")
     print(f"Weather + math:       {passed_weather_math} / {len(weather_math_results)} passed")
+    print(f"Web search questions: {passed_web_search} / {len(web_search_results)} passed")
     print(f"Non-math questions:   {passed_non_math} / {len(non_math_results)} passed")
     print(f"Repetition test:      {passed_repeat} / {len(repeat_summary)} passed")
     print(f"Total:                {total_passed} / {total} passed")

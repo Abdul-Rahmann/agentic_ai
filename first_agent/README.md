@@ -5,7 +5,8 @@ This agent started as a simple math assistant and evolved into a multi-tool agen
 1. Evaluate math expressions with `calculate(expression)`.
 2. Read text files with `read_file(path)`.
 3. Fetch live weather with `get_weather(city)`.
-4. Combine tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”* or *“What is the temperature in Paris plus 10?”*
+4. Search Wikipedia with `web_search(query)`.
+5. Combine tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”* or *“What is the temperature in Paris plus 10?”*
 
 It demonstrates the full agent loop with **tool selection, execution, and multi-turn planning**.
 
@@ -44,7 +45,7 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 - `math_agent.py` — the agent implementation
 - `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
-- `stress_test.py` — benchmark suite covering math, file reads, weather, multi-step tasks, and non-math questions
+- `stress_test.py` — benchmark suite covering math, file reads, weather, web search, multi-step tasks, and non-math questions
 - `test_retry.py` — unit-style test that exercises the reflection retry loop with a mocked LLM
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
@@ -76,6 +77,7 @@ Try questions like:
 - `What is the product of the numbers in data/numbers.txt?` (answer: `993600`)
 - `What is the weather in Paris?`
 - `What is the temperature in Paris plus 10?`
+- `Who is the CEO of OpenAI?`
 - `What is the capital of France?`
 
 ## Run the stress test
@@ -84,7 +86,7 @@ Try questions like:
 python first_agent/stress_test.py
 ```
 
-The current suite covers 31 cases and passes all of them with `llama3.1:latest`.
+The current suite covers 32 cases and passes all of them with `llama3.1:latest`.
 
 ## Run with OpenAI (optional)
 
@@ -116,13 +118,19 @@ Reads a text file relative to the `first_agent` directory. Paths outside this di
 
 Fetches the current weather for a city using the [Open-Meteo](https://open-meteo.com/) API (no API key required). It geocodes the city name, retrieves the current forecast, and returns a short human-readable summary such as `Current weather in Paris, France: 15°C, partly cloudy.`
 
+### `web_search(query)`
+
+Searches the [DuckDuckGo Instant Answer API](https://duckduckgo.com/api) first, then falls back to the [Wikipedia API](https://www.mediawiki.org/wiki/API:Main_page) if DuckDuckGo has no result. No API key is required. Uses a small in-process cache and tries a few query variants (e.g., stripping "current", "who is", etc.) before giving up. Returns errors cleanly if no result is found.
+
+**Limitations**: DuckDuckGo Instant Answer is good for factual/entity queries (e.g., "President of Ghana") but not for real-time data like "today's date". For true live web search, a paid API such as Tavily or Serper is recommended.
+
 ## Guards and reliability patterns
 
 - **No repeated tool calls**: the agent is not allowed to call the same tool with the same input twice. This prevents infinite loops.
 - **Clean error messages**: if a tool fails, the user sees a readable error instead of a raw Python traceback.
 - **Answer cleanup**: removes stray prefixes like `assistant:` or `Answer:` that small local models sometimes emit.
 - **Expression normalization**: common math notation (`^`, `!`) is rewritten to valid Python before evaluation.
-- **Reflection / critic**: before returning the final answer, a separate prompt verifies it against the tool history. If it flags an issue, the answer is returned with an `[Unverified: ...]` warning.
+- **Reflection / critic**: before returning the final answer, a separate prompt verifies it against the tool history. If it flags an issue, the answer is returned with an `[Unverified: ...]` warning. The critic is instructed to trust live external tool results (weather, web search) over the model's own training knowledge.
 
 ## Reflection and retry
 
@@ -219,12 +227,16 @@ Traces are disabled during stress testing to keep the benchmark clean.
 6. A retry loop that feeds the critic's reason back into the prompt enables self-correction, but only if the underlying tool results are reliable.
 7. Tracing turns opaque failures into replayable records.
 8. External API tools need timeouts, clear error messages, and test assertions that tolerate changing real-world data (e.g., current temperature).
+9. Adding tools one at a time lets you isolate regressions in planning; a fourth tool can make the plan prompt long enough that a few-shot example for an existing multi-step case needs to be reinforced.
+10. Free search APIs (DuckDuckGo Instant Answer, Wikipedia) cover factual/entity queries but not real-time data. A hybrid fallback (DuckDuckGo → Wikipedia) improves coverage without adding keys.
+11. The reflection critic must be told explicitly to trust live external tool results over its own training knowledge, otherwise it will reject current facts with hallucinated cutoff dates.
 
 ## Next steps
 
 1. ~~Add a third tool, such as a web search or a Python code execution sandbox.~~ Done: added `get_weather(city)`.
-2. Evaluate the agent on longer, more ambiguous multi-step tasks.
-3. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
-4. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
-5. Add a fourth tool, such as web search or a sandboxed code executor.
-6. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
+2. ~~Add a fourth tool, such as web search or a sandboxed code executor.~~ Done: added `web_search(query)` (DuckDuckGo + Wikipedia fallback).
+3. Add a date/time tool so "today's date" works reliably without relying on search.
+4. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
+5. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
+6. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
+7. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
