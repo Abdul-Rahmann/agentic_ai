@@ -15,12 +15,16 @@ import os
 import re
 import statistics
 import time
+from datetime import datetime
 
 import sys
 sys.path.insert(0, "first_agent")
 from math_agent import run_agent
 
 DATA_DIR = "first_agent/data"
+
+TODAY_STR = datetime.now().strftime("%Y-%m-%d")
+TODAY_YEAR = datetime.now().strftime("%Y")
 
 # -----------------------------------------------------------------------------
 # Test cases
@@ -90,10 +94,24 @@ WEB_SEARCH_QUESTIONS = [
     ),
 ]
 
+# Date questions. The expected answer is today's date, so we generate the
+# expected substrings at runtime.
+DATE_QUESTIONS = [
+    (
+        "What is today's date?",
+        [TODAY_STR, TODAY_YEAR],
+    ),
+    (
+        "What date is today?",
+        [TODAY_STR, TODAY_YEAR],
+    ),
+]
+
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+
 
 
 def extract_number(text: str):
@@ -221,6 +239,13 @@ def main():
         results.append(result)
         print_result(result)
 
+    # Date questions.
+    print("\n--- Date Questions ---\n")
+    for question, expected_substrings in DATE_QUESTIONS:
+        result = run_single_test(question, expected_substrings=expected_substrings)
+        results.append(result)
+        print_result(result)
+
     # Non-math questions.
     print("\n--- Non-Math Questions ---\n")
     for question, _ in NON_MATH_QUESTIONS:
@@ -244,6 +269,7 @@ def main():
     weather_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_QUESTIONS]]
     weather_math_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_MATH_QUESTIONS]]
     web_search_results = [r for r in results if r["question"] in [q for q, _ in WEB_SEARCH_QUESTIONS]]
+    date_results = [r for r in results if r["question"] in [q for q, _ in DATE_QUESTIONS]]
     non_math_results = [r for r in results if r["question"] in [q for q, _ in NON_MATH_QUESTIONS]]
     repeat_summary = repeat_results
 
@@ -253,6 +279,7 @@ def main():
     passed_weather = sum(r["passed"] for r in weather_results)
     passed_weather_math = sum(r["passed"] for r in weather_math_results)
     passed_web_search = sum(r["passed"] for r in web_search_results)
+    passed_date = sum(r["passed"] for r in date_results)
     passed_non_math = sum(r["passed"] for r in non_math_results)
     passed_repeat = sum(r["passed"] for r in repeat_summary)
 
@@ -270,6 +297,7 @@ def main():
     print(f"Weather questions:    {passed_weather} / {len(weather_results)} passed")
     print(f"Weather + math:       {passed_weather_math} / {len(weather_math_results)} passed")
     print(f"Web search questions: {passed_web_search} / {len(web_search_results)} passed")
+    print(f"Date questions:       {passed_date} / {len(date_results)} passed")
     print(f"Non-math questions:   {passed_non_math} / {len(non_math_results)} passed")
     print(f"Repetition test:      {passed_repeat} / {len(repeat_summary)} passed")
     print(f"Total:                {total_passed} / {total} passed")

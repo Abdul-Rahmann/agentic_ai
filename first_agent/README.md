@@ -5,8 +5,9 @@ This agent started as a simple math assistant and evolved into a multi-tool agen
 1. Evaluate math expressions with `calculate(expression)`.
 2. Read text files with `read_file(path)`.
 3. Fetch live weather with `get_weather(city)`.
-4. Search Wikipedia with `web_search(query)`.
-5. Combine tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”* or *“What is the temperature in Paris plus 10?”*
+4. Get today's date with `get_current_date()`.
+5. Search the web with `web_search(query)`.
+6. Combine tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”* or *“What is the temperature in Paris plus 10?”*
 
 It demonstrates the full agent loop with **tool selection, execution, and multi-turn planning**.
 
@@ -78,6 +79,7 @@ Try questions like:
 - `What is the weather in Paris?`
 - `What is the temperature in Paris plus 10?`
 - `Who is the CEO of OpenAI?`
+- `What is today's date?`
 - `What is the capital of France?`
 
 ## Run the stress test
@@ -86,7 +88,7 @@ Try questions like:
 python first_agent/stress_test.py
 ```
 
-The current suite covers 32 cases and passes all of them with `llama3.1:latest`.
+The current suite covers 34 cases and passes all of them with `llama3.1:latest`.
 
 ## Run with OpenAI (optional)
 
@@ -117,6 +119,10 @@ Reads a text file relative to the `first_agent` directory. Paths outside this di
 ### `get_weather(city)`
 
 Fetches the current weather for a city using the [Open-Meteo](https://open-meteo.com/) API (no API key required). It geocodes the city name, retrieves the current forecast, and returns a short human-readable summary such as `Current weather in Paris, France: 15°C, partly cloudy.`
+
+### `get_current_date()`
+
+Returns today's date from the system clock in the format `YYYY-MM-DD (DayName)`, e.g. `2026-08-23 (Sunday)`. No network call is required.
 
 ### `web_search(query)`
 
@@ -230,12 +236,13 @@ Traces are disabled during stress testing to keep the benchmark clean.
 9. Adding tools one at a time lets you isolate regressions in planning; a fourth tool can make the plan prompt long enough that a few-shot example for an existing multi-step case needs to be reinforced.
 10. Free search APIs (DuckDuckGo Instant Answer, Wikipedia) cover factual/entity queries but not real-time data. A hybrid fallback (DuckDuckGo → Wikipedia) improves coverage without adding keys.
 11. The reflection critic must be told explicitly to trust live external tool results over its own training knowledge, otherwise it will reject current facts with hallucinated cutoff dates.
+12. Some "current" questions (today's date, exact time) are better served by a dedicated deterministic tool than by any search engine.
 
 ## Next steps
 
 1. ~~Add a third tool, such as a web search or a Python code execution sandbox.~~ Done: added `get_weather(city)`.
 2. ~~Add a fourth tool, such as web search or a sandboxed code executor.~~ Done: added `web_search(query)` (DuckDuckGo + Wikipedia fallback).
-3. Add a date/time tool so "today's date" works reliably without relying on search.
+3. ~~Add a date/time tool so "today's date" works reliably without relying on search.~~ Done: added `get_current_date()`.
 4. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
 5. Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
 6. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.

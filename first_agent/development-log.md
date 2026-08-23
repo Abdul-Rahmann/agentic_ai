@@ -690,6 +690,54 @@ DuckDuckGo Instant Answer is not a real-time search engine. Queries like *"What 
 
 ---
 
+## Experiment 8: Fifth Tool — Current Date
+
+**Date**: 2026-08-23  
+**Goal**: Add a deterministic tool for today's date so the agent can answer real-time date questions reliably, without depending on search.
+
+### What was added
+
+- New tool: `get_current_date()` in `first_agent/math_agent.py`.
+  - Returns the system date in `YYYY-MM-DD (DayName)` format (e.g., `2026-08-23 (Sunday)`).
+  - No network call, no API key, fully deterministic.
+- Updated `TOOLS`, plan prompt examples, and interactive examples.
+- Added `DATE_QUESTIONS` to `first_agent/stress_test.py` with runtime-generated expected substrings.
+
+### Why a dedicated date tool matters
+
+Search engines and instant-answer APIs are not built for "today's date":
+- DuckDuckGo returns an empty answer or stale cached calendars.
+- Wikipedia has no article for "today".
+- A small local model will hallucinate a date from its training data.
+
+A simple system-clock tool solves the problem deterministically and demonstrates a general principle: **not every "current" question should be answered by search**. Some questions are best answered by a dedicated, cheap, deterministic tool.
+
+### Stress test results with five tools
+
+```text
+Math questions:       23 / 23 passed
+Read-file questions:   1 /  1 passed
+Multi-step questions:  2 /  2 passed
+Weather questions:    1 /  1 passed
+Weather + math:       1 /  1 passed
+Web search questions:  1 /  1 passed
+Date questions:        2 /  2 passed
+Non-math questions:    3 /  3 passed
+Repetition test:       5 /  5 passed
+Total:                34 / 34 passed (100%)
+Mean response time:    4.34s
+Max response time:    11.75s
+```
+
+### Key observations
+
+- A fifth tool did not break any existing tests.
+- The model correctly chose `get_current_date()` for date questions instead of `web_search` or `read_file`.
+- Deterministic system tools are the cheapest and most reliable way to answer time-sensitive questions.
+- The stress test expected substrings are generated at runtime because the expected date changes every day.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  

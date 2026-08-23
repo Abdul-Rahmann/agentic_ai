@@ -12,6 +12,7 @@ Tools:
   - calculate(expression): evaluates a mathematical expression.
   - read_file(path): reads a text file within the project directory.
   - get_weather(city): fetches the current weather for a city.
+  - get_current_date(): returns today's date from the system clock.
   - web_search(query): searches DuckDuckGo Instant Answer for a query and returns a summary.
 
 Runs locally with Ollama (llama3.1). Set USE_OPENAI=1 to use OpenAI instead.
@@ -159,6 +160,12 @@ def _weather_code_to_description(code: int | None) -> str:
     return descriptions.get(code, "unknown")
 
 
+def get_current_date(_input: str = "") -> str:
+    """Return today's date from the system clock."""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d (%A)")
+
+
 _WEB_SEARCH_CACHE: dict[str, str] = {}
 
 
@@ -265,6 +272,7 @@ TOOLS = {
     "calculate": calculate,
     "read_file": read_file,
     "get_weather": get_weather,
+    "get_current_date": get_current_date,
     "web_search": web_search,
 }
 
@@ -310,6 +318,7 @@ _PLAN_SYSTEM_PROMPT = """You are a helpful assistant. You have access to these t
 - calculate(expression): evaluates a mathematical expression and returns the result.
 - read_file(path): reads the contents of a text file within the project directory.
 - get_weather(city): fetches the current weather for a city.
+- get_current_date(): returns today's date from the system clock.
 - web_search(query): searches DuckDuckGo Instant Answer for a query and returns a short summary.
 
 Rules:
@@ -319,6 +328,8 @@ Rules:
    {"tool": "read_file", "input": "<path>"}
    or
    {"tool": "get_weather", "input": "<city>"}
+   or
+   {"tool": "get_current_date", "input": ""}
    or
    {"tool": "web_search", "input": "<query>"}
 2. If you already have enough information to answer the user's question, respond with the final answer in plain text.
@@ -355,6 +366,11 @@ User: What is the weather in Paris?
 Assistant: {"tool": "get_weather", "input": "Paris"}
 Tool result: Current weather in Paris, France: 15°C, partly cloudy.
 Assistant: It is 15°C and partly cloudy in Paris.
+
+User: What is today's date?
+Assistant: {"tool": "get_current_date", "input": ""}
+Tool result: 2026-08-23 (Sunday)
+Assistant: 2026-08-23 (Sunday)
 
 User: Who is the CEO of OpenAI?
 Assistant: {"tool": "web_search", "input": "CEO of OpenAI"}
