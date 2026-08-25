@@ -11,6 +11,7 @@ To test against OpenAI instead of Ollama:
     USE_OPENAI=1 AGENT_MODEL=gpt-4o-mini python first_agent/stress_test.py
 """
 
+import argparse
 import os
 import re
 import statistics
@@ -19,7 +20,8 @@ from datetime import datetime
 
 import sys
 sys.path.insert(0, "first_agent")
-from math_agent import run_agent
+from math_agent import run_agent as hand_rolled_run_agent
+from langgraph_agent import run_agent as langgraph_run_agent
 
 DATA_DIR = "first_agent/data"
 
@@ -131,7 +133,13 @@ def values_equal(a, b, tolerance: float = 1e-6) -> bool:
     return a == b
 
 
-def run_single_test(question: str, expected=None, expected_substrings=None, expect_number: bool = False):
+def run_single_test(
+    question: str,
+    expected=None,
+    expected_substrings=None,
+    expect_number: bool = False,
+    run_agent=hand_rolled_run_agent,
+):
     """Run one test and return pass/fail status and timing."""
     start = time.time()
     try:
@@ -190,73 +198,73 @@ def print_result(result: dict):
     print()
 
 
-def main():
+def main(run_agent=hand_rolled_run_agent, agent_label: str = "Hand-Rolled"):
     results = []
 
     print("=" * 70)
-    print("STRESS TEST: Multi-Tool Agent")
+    print(f"STRESS TEST: Multi-Tool Agent ({agent_label})")
     print("=" * 70)
 
     # Math questions.
     print("\n--- Math Questions ---\n")
     for question, expected in MATH_QUESTIONS:
-        result = run_single_test(question, expected=expected)
+        result = run_single_test(question, expected=expected, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Read-file questions.
     print("\n--- Read-File Questions ---\n")
     for question, expected_substrings in READ_FILE_QUESTIONS:
-        result = run_single_test(question, expected_substrings=expected_substrings)
+        result = run_single_test(question, expected_substrings=expected_substrings, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Multi-step questions.
     print("\n--- Multi-Step Questions ---\n")
     for question, expected in MULTI_STEP_QUESTIONS:
-        result = run_single_test(question, expected=expected)
+        result = run_single_test(question, expected=expected, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Weather questions.
     print("\n--- Weather Questions ---\n")
     for question, expected_substrings in WEATHER_QUESTIONS:
-        result = run_single_test(question, expected_substrings=expected_substrings)
+        result = run_single_test(question, expected_substrings=expected_substrings, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Weather + math questions.
     print("\n--- Weather + Math Questions ---\n")
     for question, _ in WEATHER_MATH_QUESTIONS:
-        result = run_single_test(question, expect_number=True)
+        result = run_single_test(question, expect_number=True, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Web search questions.
     print("\n--- Web Search Questions ---\n")
     for question, expected_substrings in WEB_SEARCH_QUESTIONS:
-        result = run_single_test(question, expected_substrings=expected_substrings)
+        result = run_single_test(question, expected_substrings=expected_substrings, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Date questions.
     print("\n--- Date Questions ---\n")
     for question, expected_substrings in DATE_QUESTIONS:
-        result = run_single_test(question, expected_substrings=expected_substrings)
+        result = run_single_test(question, expected_substrings=expected_substrings, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Non-math questions.
     print("\n--- Non-Math Questions ---\n")
     for question, _ in NON_MATH_QUESTIONS:
-        result = run_single_test(question)
+        result = run_single_test(question, run_agent=run_agent)
         results.append(result)
         print_result(result)
 
     # Repetition test.
     print("\n--- Repetition Test (15 * 23 asked 5 times) ---\n")
     repeat_question = "What is 15 * 23?"
-    repeat_results = [run_single_test(repeat_question, expected=345) for _ in range(5)]
+    repeat_results = [run_single_test(repeat_question, expected=345, run_agent=run_agent) for _ in range(5)]
     for i, result in enumerate(repeat_results, 1):
         status = "PASS" if result["passed"] else "FAIL"
         print(f"  Run {i}: {status} -> {result['answer']!r}")
@@ -310,4 +318,14 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description="Stress test for the multi-tool agent")
+    parser.add_argument(
+        "--langgraph",
+        action="store_true",
+        help="Run the stress test against the LangGraph implementation instead of the hand-rolled one",
+    )
+    args = parser.parse_args()
+
+    if args.langgraph:
+        raise SystemExit(main(run_agent=langgraph_run_agent, agent_label="LangGraph"))
+    raise SystemExit(main(run_agent=hand_rolled_run_agent, agent_label="Hand-Rolled"))

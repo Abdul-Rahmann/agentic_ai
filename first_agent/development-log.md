@@ -807,6 +807,57 @@ RELIABILITY
 
 ---
 
+## Experiment 10: Rebuilding the Agent in LangGraph
+
+**Date**: 2026-08-23  
+**Goal**: Port the hand-rolled multi-tool agent into LangGraph to learn what the framework abstracts and to compare behavior, latency, and reliability.
+
+### What was built
+
+- New module: `first_agent/langgraph_agent.py`.
+  - Defines `AgentState` as a `TypedDict` with `question`, `tool_history`, `reflection_feedback`, `final_answer`, `attempts`, `done`, `pending_tool`, etc.
+  - Nodes: `plan_node`, `execute_node`, `answer_node`, `reflect_node`.
+  - Conditional edges: `route_after_plan` and `route_after_reflect`.
+  - Reuses tools and prompts from `math_agent.py` so only the control flow changes.
+- Updated `first_agent/stress_test.py` with `--langgraph` flag.
+
+### Graph structure
+
+```
+plan --[tool needed]--> execute --> plan
+  |                    |
+  +--[answer ready]--> answer --> reflect
+                              |
+                              +--[verified]--> end
+                              |
+                              +--[retry]--> plan
+```
+
+### Stress test comparison
+
+| Implementation | Pass rate | Mean latency | Max latency |
+|---|---|---|---|
+| Hand-rolled (`math_agent.py`) | 34 / 34 (100%) | ~3.91s | ~6.41s |
+| LangGraph (`langgraph_agent.py`) | 34 / 34 (100%) | ~4.00s | ~7.34s |
+
+Both implementations pass the same suite. Latency is comparable, which confirms the framework overhead is minimal relative to LLM inference time.
+
+### Key observations
+
+- The hand-rolled agent is already a state machine in disguise; LangGraph just makes it explicit.
+- Nodes are easier to reason about because each one has a single responsibility.
+- Conditional edges make the control flow visible in a way that nested `if/else` inside a loop does not.
+- State updates are explicit: each node returns a dictionary of changed keys.
+- Reusing tools and prompts made the port straightforward and proved that the prompts were the real source of reliability, not the loop code.
+
+### What LangGraph enables next
+
+- **Persistence / checkpointing**: save state after every step and resume later.
+- **Human-in-the-loop**: pause before high-risk tools and wait for approval.
+- **Multi-agent**: add a second graph actor (e.g., a planner and an executor) and coordinate them.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  

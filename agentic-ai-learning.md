@@ -808,6 +808,7 @@ Max response time:    11.75s
 
 ### Experiment 9: Trace Analyzer
 
+
 **Date**: 2026-08-23  
 **Location**: `first_agent/trace_analyzer.py`, `first_agent/traces/`  
 **Goal**: Turn JSON trace files into an actionable observability report.
@@ -832,6 +833,38 @@ Max response time:    11.75s
 - Add pass/fail classification if expected answers are added to traces.
 - Add cost estimation (per-provider token counts) when available.
 - Export the report to markdown or JSON for CI integration.
+
+---
+
+### Experiment 10: Rebuilding the Agent in LangGraph
+
+**Date**: 2026-08-23  
+**Location**: `first_agent/langgraph_agent.py`, `first_agent/stress_test.py`  
+**Goal**: Port the hand-rolled agent to LangGraph and compare the two implementations.
+
+**What was built**:
+- Created `langgraph_agent.py` with `AgentState`, `plan_node`, `execute_node`, `answer_node`, `reflect_node`, and conditional edges.
+- Reused tools and prompts from `math_agent.py`.
+- Added `--langgraph` flag to `stress_test.py`.
+
+**Stress test comparison**:
+
+| Implementation | Pass rate | Mean latency | Max latency |
+|---|---|---|---|
+| Hand-rolled | 34 / 34 (100%) | ~3.91s | ~6.41s |
+| LangGraph | 34 / 34 (100%) | ~4.00s | ~7.34s |
+
+**Key observations**:
+- The hand-rolled agent was already a state machine in disguise.
+- LangGraph makes nodes, state, and routing explicit.
+- Framework overhead is small compared to LLM inference time.
+- Reusing tools and prompts made the port straightforward and validated that prompts are the main reliability driver.
+- LangGraph opens the door to persistence, human-in-the-loop, and multi-agent coordination.
+
+**Next steps for this experiment**:
+- Add LangGraph persistence/checkpointing.
+- Add a human-in-the-loop approval gate before external tools.
+- Explore multi-agent patterns.
 
 ---
 
@@ -872,6 +905,7 @@ Use this section to track future additions to the notes.
 | 2026-08-22 | Switched `web_search` to DuckDuckGo Instant Answer with Wikipedia fallback; fixed reflection prompt to trust live tool results; stress test still 32/32. |
 | 2026-08-23 | Added fifth tool `get_current_date()`; expanded stress test to 34 cases; all 34 passing. |
 | 2026-08-23 | Added `trace_analyzer.py` to summarize trace files into latency, tool usage, guard, and reliability reports. |
+| 2026-08-23 | Rebuilt agent in LangGraph (`langgraph_agent.py`); added `--langgraph` stress-test flag; both implementations pass 34/34. |
 
 ---
 

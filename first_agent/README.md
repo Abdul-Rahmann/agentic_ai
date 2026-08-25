@@ -43,7 +43,8 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 
 ## Files
 
-- `math_agent.py` — the agent implementation
+- `math_agent.py` — the original hand-rolled agent implementation
+- `langgraph_agent.py` — the same agent rebuilt in LangGraph as a state machine
 - `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
 - `stress_test.py` — benchmark suite covering math, file reads, weather, web search, date, multi-step tasks, and non-math questions
@@ -90,6 +91,16 @@ python first_agent/stress_test.py
 ```
 
 The current suite covers 34 cases and passes all of them with `llama3.1:latest`.
+
+### Run the LangGraph version
+
+The same agent is also implemented in LangGraph (`first_agent/langgraph_agent.py`). To run the stress test against it:
+
+```bash
+python first_agent/stress_test.py --langgraph
+```
+
+Both implementations currently pass **34 / 34** cases with comparable latency.
 
 ## Analyze traces
 
@@ -194,6 +205,38 @@ Final result: 345
 
 Run `python first_agent/test_retry.py` to execute this test.
 
+## Hand-rolled vs. LangGraph
+
+This project includes two implementations of the same agent:
+
+| Aspect | `math_agent.py` (hand-rolled) | `langgraph_agent.py` (LangGraph) |
+|---|---|---|
+| Loop control | Python `for` loops + `break`/`continue` | State graph with nodes and conditional edges |
+| State | Local variables (`tool_history`, `final_answer`, etc.) | Typed `AgentState` dict passed between nodes |
+| Routing | Inline `if/else` inside the loop | Explicit `route_after_plan` / `route_after_reflect` functions |
+| Tracing | Custom JSON trace writer | Same trace writer; nodes record steps as they run |
+| Prompts | Manually built message lists | Reuses the same helper functions from `math_agent.py` |
+| Tools | Defined in `math_agent.py` | Imported from `math_agent.py` |
+
+The LangGraph version makes the state machine visible:
+
+```
+plan --[tool needed]--> execute --> plan
+  |                    |
+  |                    |
+  +--[answer ready]--> answer --> reflect
+                              |
+                              +--[verified]--> end
+                              |
+                              +--[retry]--> plan
+```
+
+**Why keep both?**
+
+- The hand-rolled version shows what the framework is abstracting away.
+- The LangGraph version is easier to extend with persistence, human-in-the-loop, or multi-agent patterns.
+- Running the same stress test against both proves they behave the same.
+
 ## Observability
 
 Every interactive run automatically writes a JSON trace to `first_agent/traces/`.
@@ -259,6 +302,7 @@ Traces are disabled during stress testing to keep the benchmark clean.
 11. The reflection critic must be told explicitly to trust live external tool results over its own training knowledge, otherwise it will reject current facts with hallucinated cutoff dates.
 12. Some "current" questions (today's date, exact time) are better served by a dedicated deterministic tool than by any search engine.
 13. A trace analyzer turns a folder of JSON traces into actionable metrics: duration per phase, tool usage, guard frequency, and common failure patterns.
+14. Rebuilding the same agent in LangGraph validates that the framework version behaves identically to the hand-rolled version while making the state machine explicit.
 
 ## Next steps
 
@@ -266,6 +310,8 @@ Traces are disabled during stress testing to keep the benchmark clean.
 2. ~~Add a fourth tool, such as web search or a sandboxed code executor.~~ Done: added `web_search(query)` (DuckDuckGo + Wikipedia fallback).
 3. ~~Add a date/time tool so "today's date" works reliably without relying on search.~~ Done: added `get_current_date()`.
 4. ~~Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.~~ Done: added `trace_analyzer.py`.
-5. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
-6. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
-7. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
+5. ~~Rebuild the agent in a framework to learn what frameworks abstract.~~ Done: rebuilt in LangGraph (`langgraph_agent.py`).
+6. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
+7. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
+8. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
+9. Add LangGraph persistence/checkpointing so a run can be paused and resumed.
