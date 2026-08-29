@@ -2,6 +2,8 @@
 
 > A living document for learning, building, and optimizing autonomous AI agents.  
 > Update this file as new concepts, frameworks, experiments, and references are encountered.
+>
+> **For the complete step-by-step learning path, agents, features, tools, and assessment checklist, see [`AGENTS_ROADMAP.md`](./AGENTS_ROADMAP.md).**
 
 ---
 
@@ -868,6 +870,49 @@ Max response time:    11.75s
 
 ---
 
+### Experiment 11: Human-in-the-Loop Approval in LangGraph
+
+**Date**: 2026-08-29
+**Location**: `first_agent/langgraph_agent.py`, `first_agent/stress_test.py`
+**Goal**: Add a human approval gate before external tools (`web_search`, `get_weather`) in the LangGraph agent.
+
+**What was built**:
+- Added `APPROVAL_REQUIRED_TOOLS`, `approved_tools`, and `auto_approve` to the LangGraph agent.
+- Used `langgraph.types.interrupt()` inside `execute_node` to pause before external tools.
+- Updated the outer `run_agent` loop to detect `__interrupt__` events, prompt the user, and resume with `Command(resume=response)`.
+- Added `--auto-approve` to `stress_test.py` for headless LangGraph runs.
+
+**First attempt failed**:
+- A manual checkpoint using `pending_approval` state + `await_approval` node recursed infinitely (`execute -> await_approval -> execute`) before the outer `input()` was called.
+
+**Fix**:
+- Replaced the manual checkpoint with LangGraph's native `interrupt()`. This suspends execution mid-node and exposes a resume API.
+
+**Approval behavior**:
+| User input | Result |
+|---|---|
+| `y` | Tool executes and the agent continues. |
+| anything else | Agent returns `Tool <name> was not approved.` and stops. |
+
+**Stress test results**:
+
+| Implementation | Pass rate | Mean latency | Max latency |
+|---|---|---|---|
+| Hand-rolled | 34 / 34 (100%) | ~4.03s | ~6.76s |
+| LangGraph (auto-approve) | 34 / 34 (100%) | ~4.29s | ~12.93s |
+
+**Key observations**:
+- Native interrupts are the right primitive for human-in-the-loop; hand-rolled checkpoints are fragile.
+- Approval gates are a governance/safety layer, not just UX.
+- `auto_approve` is needed for automated tests but should be off by default in interactive use.
+
+**Next steps for this experiment**:
+- Add per-tool approval policies.
+- Add a timeout to the approval prompt for headless defaults.
+- Combine with LangGraph persistence so paused approvals survive restarts.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -906,6 +951,7 @@ Use this section to track future additions to the notes.
 | 2026-08-23 | Added fifth tool `get_current_date()`; expanded stress test to 34 cases; all 34 passing. |
 | 2026-08-23 | Added `trace_analyzer.py` to summarize trace files into latency, tool usage, guard, and reliability reports. |
 | 2026-08-23 | Rebuilt agent in LangGraph (`langgraph_agent.py`); added `--langgraph` stress-test flag; both implementations pass 34/34. |
+| 2026-08-29 | Added human-in-the-loop approval to the LangGraph agent using `interrupt()`; added `--auto-approve` to `stress_test.py`; both hand-rolled and LangGraph (auto-approve) pass 34/34. |
 
 ---
 

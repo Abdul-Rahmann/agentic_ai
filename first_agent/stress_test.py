@@ -324,8 +324,22 @@ if __name__ == "__main__":
         action="store_true",
         help="Run the stress test against the LangGraph implementation instead of the hand-rolled one",
     )
+    parser.add_argument(
+        "--auto-approve",
+        dest="auto_approve",
+        action="store_true",
+        help="Auto-approve external tools in the LangGraph agent (required for non-interactive runs)",
+    )
     args = parser.parse_args()
 
     if args.langgraph:
-        raise SystemExit(main(run_agent=langgraph_run_agent, agent_label="LangGraph"))
+        if not args.auto_approve:
+            print("Warning: LangGraph agent will pause for approval on external tools.")
+            print("Use --auto-approve for non-interactive stress testing.")
+        raise SystemExit(
+            main(
+                run_agent=lambda *a, **kw: langgraph_run_agent(*a, **kw, auto_approve=args.auto_approve),
+                agent_label="LangGraph",
+            )
+        )
     raise SystemExit(main(run_agent=hand_rolled_run_agent, agent_label="Hand-Rolled"))

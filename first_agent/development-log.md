@@ -858,6 +858,84 @@ Both implementations pass the same suite. Latency is comparable, which confirms 
 
 ---
 
+## Experiment 11: Human-in-the-Loop Approval in LangGraph
+
+**Date**: 2026-08-29
+**Goal**: Add a human approval gate before external/high-risk tools (`web_search`, `get_weather`) in the LangGraph agent, and learn why native framework interrupts matter.
+
+### What was built
+
+- Added `APPROVAL_REQUIRED_TOOLS = {"get_weather", "web_search"}` to `first_agent/langgraph_agent.py`.
+- Added `approved_tools` and `auto_approve` to `AgentState`.
+- In `execute_node`, when an approval-required tool is requested and `auto_approve` is `False`, the node calls `langgraph.types.interrupt({"tool": ..., "input": ...})`.
+- The outer `run_agent` loop detects the `__interrupt__` event in the stream, prompts the user, and resumes with `Command(resume=response)`.
+- If the user denies approval, the node returns `done=True` with a clean refusal message.
+- Added `--auto-approve` to `first_agent/stress_test.py` so the LangGraph stress test can run headlessly.
+
+### First attempt and the recursion bug
+
+The first implementation tried to build the approval checkpoint manually:
+
+- `execute_node` returned `{"pending_approval": pending}` when approval was needed.
+- An `await_approval` node acted as a "pause" point.
+- `route_after_await_approval` routed back to `execute` if `pending_tool` was still set.
+
+This produced an infinite `execute -> await_approval -> execute` loop before the outer `input()` was ever called. The reason: the graph kept running inside the checkpoint instead of actually pausing. The framework could not distinguish "pause for human input" from "keep executing the state machine."
+
+### Fix: use LangGraph's native `interrupt()`
+
+Replaced the manual checkpoint with `langgraph.types.interrupt()`:
+
+```python
+response = interrupt({"tool": tool_name, "input": tool_input})
+if not str(response).lower().startswith("y"):
+    # ... return refusal ...
+approved_tools = approved_tools + [tool_name]
+```
+
+`interrupt()` truly pauses the node. The outer loop resumes it with:
+
+```python
+state = Command(resume=response)
+```
+
+The `await_approval` node and its routing edge were removed.
+
+### Manual approval behavior
+
+| User input | Result |
+|---|---|
+| `y` | Tool executes and the agent continues planning/answering. |
+| Anything else | Agent returns `Tool <name> was not approved.` and stops. |
+| No input needed | `calculate`, `read_file`, and `get_current_date` never interrupt. |
+
+### Stress test results
+
+With `--auto-approve`, both implementations still pass the full suite:
+
+| Implementation | Pass rate | Mean latency | Max latency |
+|---|---|---|---|
+| Hand-rolled (`math_agent.py`) | 34 / 34 (100%) | ~4.03s | ~6.76s |
+| LangGraph (`langgraph_agent.py`) | 34 / 34 (100%) | ~4.29s | ~12.93s |
+
+The max latency outlier in the LangGraph run was a single slow tool/network call, not framework overhead.
+
+### Key observations
+
+- A naive manual checkpoint inside a state machine is fragile: the framework will keep routing unless it knows to pause.
+- Native interrupts are designed exactly for human-in-the-loop: they suspend execution mid-node and expose a clean resume API.
+- Approval gates are a governance layer, not just a UX feature. They prevent uncontrolled external calls in production.
+- `auto_approve` is essential for automated testing, but it should be off by default in interactive mode.
+
+### What this enables next
+
+- Add per-tool approval policies (e.g., always approve weather, ask for web search).
+- Add a timeout to the approval prompt so headless systems fail gracefully.
+- Extend to multi-step multi-tool tasks where each external call can be reviewed.
+- Use LangGraph persistence to keep the paused state across process restarts.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -888,5 +966,8 @@ Both implementations pass the same suite. Latency is comparable, which confirms 
 - [x] Add an explicit retry loop when reflection flags an answer as incorrect.
 - [x] Add a third tool (e.g., web search or code execution sandbox).
 - [x] Add a fourth tool or capability (e.g., web search, sandboxed code execution, or persistent memory).
+- [x] Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
+- [x] Rebuild the agent in LangGraph.
+- [x] Add human-in-the-loop approval before external tools in LangGraph.
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
-- [ ] Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
+- [ ] Add LangGraph persistence/checkpointing across process restarts.

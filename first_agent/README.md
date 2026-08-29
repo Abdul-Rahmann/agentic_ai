@@ -97,7 +97,11 @@ The current suite covers 34 cases and passes all of them with `llama3.1:latest`.
 The same agent is also implemented in LangGraph (`first_agent/langgraph_agent.py`). To run the stress test against it:
 
 ```bash
-python first_agent/stress_test.py --langgraph
+# Non-interactive: auto-approve external tools
+python first_agent/stress_test.py --langgraph --auto-approve
+
+# Interactive: you will be prompted before web_search / get_weather
+python first_agent/langgraph_agent.py
 ```
 
 Both implementations currently pass **34 / 34** cases with comparable latency.
@@ -231,11 +235,44 @@ plan --[tool needed]--> execute --> plan
                               +--[retry]--> plan
 ```
 
+With human-in-the-loop approval, the execute node pauses before external tools:
+
+```
+plan --[tool needed]--> execute --[needs approval]--> (human) --> execute --> plan
+```
+
 **Why keep both?**
 
 - The hand-rolled version shows what the framework is abstracting away.
 - The LangGraph version is easier to extend with persistence, human-in-the-loop, or multi-agent patterns.
 - Running the same stress test against both proves they behave the same.
+
+## Human-in-the-loop approval
+
+The LangGraph agent can pause before high-risk or external tools (`web_search`, `get_weather`) and ask the user for approval. This is implemented with LangGraph's `interrupt()` checkpoint.
+
+Run interactively with approval enabled (default):
+
+```bash
+python first_agent/langgraph_agent.py
+```
+
+When the agent wants to call `web_search` or `get_weather`, you will see:
+
+```text
+[Approval] Waiting for approval to run web_search('CEO of OpenAI')
+Approve web_search('CEO of OpenAI')? [y/N]: y
+```
+
+Type `y` to allow the tool, or anything else to deny it.
+
+Run the stress test with `--auto-approve` so the benchmark does not block on input:
+
+```bash
+python first_agent/stress_test.py --langgraph --auto-approve
+```
+
+Auto-approve bypasses the interrupt and lets external tools run without prompting. It is useful for headless/CI runs, but it removes the safety gate.
 
 ## Observability
 
@@ -303,6 +340,7 @@ Traces are disabled during stress testing to keep the benchmark clean.
 12. Some "current" questions (today's date, exact time) are better served by a dedicated deterministic tool than by any search engine.
 13. A trace analyzer turns a folder of JSON traces into actionable metrics: duration per phase, tool usage, guard frequency, and common failure patterns.
 14. Rebuilding the same agent in LangGraph validates that the framework version behaves identically to the hand-rolled version while making the state machine explicit.
+15. Human-in-the-loop approval is easiest to implement correctly with native framework checkpoints (e.g., `langgraph.types.interrupt()`) rather than hand-rolled state-machine nodes. A naive `pending_approval` routing node can recurse before the outer loop ever pauses.
 
 ## Next steps
 
