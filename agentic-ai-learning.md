@@ -988,6 +988,7 @@ Use this section to track future additions to the notes.
 | 2026-08-23 | Rebuilt agent in LangGraph (`langgraph_agent.py`); added `--langgraph` stress-test flag; both implementations pass 34/34. |
 | 2026-08-29 | Added human-in-the-loop approval to the LangGraph agent using `interrupt()`; added `--auto-approve` to `stress_test.py`; both hand-rolled and LangGraph (auto-approve) pass 34/34. |
 | 2026-08-29 | Added local semantic memory / RAG (`memory.py`, `recall_knowledge` tool) over the project's own docs using Chroma + sentence-transformers; expanded stress test to 36 cases; fixed an unrelated SSL cert environment issue; both implementations pass 36/36. |
+| 2026-08-29 | Fixed two `memory.py` gaps found by manual testing: chunking is now heading-aware (never spans two sections) for better retrieval, and seeding is fingerprint-based (auto re-seeds on doc changes, not just on an empty collection). Also fixed a brittle stress-test assertion pattern (one exact substring required) that was flagging factually-correct, differently-phrased answers as failures. |
 
 ---
 

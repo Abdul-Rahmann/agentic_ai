@@ -3,3 +3,4 @@ __pycache__/
 *.pyo
 first_agent/traces/*.json
 first_agent/chroma_db/
+first_agent/.memory_fingerprint

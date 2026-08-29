@@ -174,11 +174,14 @@ Searches the [DuckDuckGo Instant Answer API](https://duckduckgo.com/api) first, 
 
 Searches a local semantic memory store built from this project's own docs (`agentic-ai-learning.md`, `AGENTS_ROADMAP.md`, `first_agent/README.md`, `first_agent/development-log.md`). This is retrieval-augmented generation (RAG) applied to the project's own history:
 
-- On first use, the docs are chunked (by paragraph, merged up to ~800 characters) and embedded with `sentence-transformers` (`all-MiniLM-L6-v2`, runs locally, no API key).
+- Docs are split by section heading first, then chunked within each section (paragraphs merged up to ~800 characters, never spanning two headings) and embedded with `sentence-transformers` (`all-MiniLM-L6-v2`, runs locally, no API key). Each chunk is tagged `[Section: <heading>]` so its embedding reflects what topic it belongs to, not just its literal words.
 - Chunks + embeddings are persisted in a local Chroma collection at `first_agent/chroma_db/` (gitignored — it's derived data, rebuilt automatically from the docs).
-- A query embeds the question and returns the top-matching chunks, tagged with their source file, as the tool result — the answer-synthesis step then writes the final answer from those chunks, same as any other tool.
+- Seeding is staleness-aware: a fingerprint of each source doc's size + mtime is stored in `first_agent/.memory_fingerprint` (also gitignored) and checked on every call. If any source doc changed since the last seed, it re-embeds automatically — no need to remember to re-run anything by hand.
+- A query embeds the question and returns the top-4 matching chunks, tagged with their source file, as the tool result — the answer-synthesis step then writes the final answer from those chunks, same as any other tool.
 
 Use it for questions about **this project's own design decisions, experiments, or past failures/fixes** — not general knowledge (that's `web_search`) or live external facts (`get_weather`). See the plan prompt's `recall_knowledge` example for how the two are distinguished.
+
+**Known limitation**: retrieval ranks by embedding similarity, which isn't the same as "topically correct" — a loosely-phrased query can surface mediocre matches even when a better chunk exists in the store. Reflection only checks that the answer is consistent with what was retrieved, not that the right chunk was retrieved in the first place, so a wrong-but-consistent answer can still get a `VERIFIED` stamp. Treat this tool as "usually right," not "provably right," until retrieval quality is evaluated more rigorously.
 
 To force a re-seed after editing the source docs:
 

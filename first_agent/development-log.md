@@ -981,6 +981,46 @@ With the SSL fix applied, both implementations pass the expanded 36-case suite (
 
 ---
 
+## Experiment 12 Follow-up: Heading-Aware Chunking and Staleness Detection
+
+**Date**: 2026-08-29
+**Location**: `first_agent/memory.py`, `first_agent/stress_test.py`
+**Goal**: Fix two gaps found while manually testing `recall_knowledge`: mediocre retrieval on loosely-phrased queries, and no controlled way to know whether the vector store was stale relative to the source docs.
+
+### Finding 1: retrieval quality was inconsistent
+
+Querying `recall_knowledge("what tools does this agent have")` returned a good top match but two mediocre ones (an "Advanced project ideas" list, a generic project portfolio entry) even though a precise, current tool list existed elsewhere in the store. Root cause: `_chunk_text` split by paragraph only, so a short list item embedded with no indication of which section it belonged to — its embedding carried little topical signal.
+
+**Fix**: `_split_into_sections()` now tracks markdown headings as it walks the document and pairs each paragraph with its nearest heading; `_chunk_text` tags each chunk `[Section: <heading>]` and — critically — flushes the buffer whenever the heading changes, not only when `max_chars` is exceeded, so a single chunk never spans two sections. Re-running the same query afterward surfaced the actual current tool list (from `README.md`) as a top-4 match, correctly tagged.
+
+### Finding 2: nobody could say when the store was last seeded
+
+The collection had grown from 183 to 197 chunks between two points in the same session with no explicit re-seed call traced — the only re-seed path was "if `collection.count() == 0`," which says nothing about whether the *content* is current.
+
+**Fix**: added `_compute_fingerprint()` (hashes each source file's size + mtime), persisted to `first_agent/.memory_fingerprint`. `seed_knowledge_base()` now re-seeds if the collection is empty **or** the fingerprint doesn't match, not just on emptiness. `recall_knowledge()` calls `seed_knowledge_base()` unconditionally now (cheap — a few `stat()` calls — unless something actually changed) instead of only when the collection is empty. Verified live: appending a blank line to `agentic-ai-learning.md` and calling `recall_knowledge` triggered an automatic re-seed with no `force=True` needed.
+
+### A real test-fragility finding along the way
+
+Re-running the stress test after these fixes intermittently failed a `MEMORY_QUESTIONS` case even though the answer was factually correct — it paraphrased the bug ("infinite recursion... kept running inside the checkpoint instead of actually pausing") rather than naming the literal identifier `await_approval` the assertion required. Retrieval was not at fault; the assertion was too strict for an LLM that's free to paraphrase. Generalized `run_single_test`'s substring check: a requirement can now be a plain string (must appear verbatim) or a tuple of alternative phrasings (any one satisfies it). Applied the same fix to a similarly brittle weather-question assertion that required the literal word "Paris" even though the model's terse answer format sometimes omits the city name.
+
+### Stress test results
+
+Both implementations pass the full 36-case suite after all three fixes:
+
+| Implementation | Pass rate |
+|---|---|
+| Hand-rolled | 36 / 36 (100%) |
+| LangGraph (auto-approve) | 36 / 36 (100%) |
+
+### Key observations
+
+- Chunk boundaries should respect document structure (headings), not just character counts — a chunk that spans two topics dilutes its own embedding.
+- "Skip if not empty" and "skip if not stale" are different guarantees. Only the second one is actually the property you want for a knowledge base that gets edited over time.
+- A stress test assertion that requires one exact identifier is testing phrasing, not correctness. Prefer asserting the underlying fact holds via any of several plausible phrasings.
+- None of these three issues would have surfaced without actually running the tool by hand on real queries — the original 2/2 pass on `MEMORY_QUESTIONS` masked all three, because both fixed test questions happened to retrieve cleanly and get answered in a way that matched the (too-strict) assertions.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
