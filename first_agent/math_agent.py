@@ -14,6 +14,8 @@ Tools:
   - get_weather(city): fetches the current weather for a city.
   - get_current_date(): returns today's date from the system clock.
   - web_search(query): searches DuckDuckGo Instant Answer for a query and returns a summary.
+  - recall_knowledge(query): searches this project's own docs (a local semantic
+    memory / RAG store) for relevant background.
 
 Runs locally with Ollama (llama3.1). Set USE_OPENAI=1 to use OpenAI instead.
 """
@@ -26,6 +28,7 @@ import time
 
 import ollama
 
+from memory import recall_knowledge
 from tracer import NullTrace, Trace, current_ms
 
 MODEL = os.getenv("AGENT_MODEL", "llama3.1:latest")
@@ -274,6 +277,7 @@ TOOLS = {
     "get_weather": get_weather,
     "get_current_date": get_current_date,
     "web_search": web_search,
+    "recall_knowledge": recall_knowledge,
 }
 
 
@@ -320,6 +324,10 @@ _PLAN_SYSTEM_PROMPT = """You are a helpful assistant. You have access to these t
 - get_weather(city): fetches the current weather for a city.
 - get_current_date(): returns today's date from the system clock.
 - web_search(query): searches DuckDuckGo Instant Answer for a query and returns a short summary.
+- recall_knowledge(query): searches this project's own documentation (development log,
+  learning notes, roadmap, READMEs) for relevant background. Use this for questions about
+  THIS project's own history, experiments, design decisions, or past failures/fixes — not
+  for general knowledge or current events.
 
 Rules:
 1. If you need to use a tool, respond with ONLY a JSON object in this exact format:
@@ -332,6 +340,8 @@ Rules:
    {"tool": "get_current_date", "input": ""}
    or
    {"tool": "web_search", "input": "<query>"}
+   or
+   {"tool": "recall_knowledge", "input": "<query>"}
 2. If you already have enough information to answer the user's question, respond with the final answer in plain text.
 3. Do NOT repeat a tool call you have already made. Use the result you already have.
 4. Do not include any explanation, code blocks, or markdown outside the JSON or the final answer.
@@ -379,6 +389,11 @@ Assistant: Sam Altman is the CEO of OpenAI.
 
 User: What is the capital of France?
 Assistant: Paris
+
+User: Why did the first human-in-the-loop approval attempt in this project fail?
+Assistant: {"tool": "recall_knowledge", "input": "human-in-the-loop approval attempt failed"}
+Tool result: From development-log.md: A manual checkpoint using `pending_approval` state + `await_approval` node recursed infinitely (`execute -> await_approval -> execute`) before the outer `input()` was called.
+Assistant: The first attempt used a manual `pending_approval`/`await_approval` node that recursed infinitely instead of actually pausing for input.
 """
 
 

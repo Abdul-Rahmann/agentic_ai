@@ -538,7 +538,7 @@ Use this checklist to track mastery.
 ### Phase 6 — Memory & RAG
 - [ ] Short-term history is summarized/pruned.
 - [ ] Past failures are stored and reused.
-- [ ] Agent retrieves from a vector store.
+- [x] Agent retrieves from a vector store.
 
 ### Phase 7 — Multi-Agent
 - [ ] Built a team of 2+ agents.

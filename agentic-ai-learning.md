@@ -913,6 +913,41 @@ Max response time:    11.75s
 
 ---
 
+### Experiment 12: Semantic Memory / RAG over the Project's Own Docs
+
+**Date**: 2026-08-29
+**Location**: `first_agent/memory.py`, `first_agent/math_agent.py`, `first_agent/stress_test.py`
+**Goal**: Give the agent a local knowledge base and a `recall_knowledge` tool (first piece of Phase 6: Memory & RAG).
+
+**What was built**:
+- `memory.py`: local RAG store using `chromadb` (persistent) + `sentence-transformers` (`all-MiniLM-L6-v2`, local, no API key).
+- Chunks and embeds this repo's own docs (`agentic-ai-learning.md`, `AGENTS_ROADMAP.md`, both READMEs, `development-log.md`); seeds once, persists to `first_agent/chroma_db/` (gitignored, rebuildable).
+- `recall_knowledge(query)` added to `TOOLS` and the plan prompt, with a rule distinguishing it from `web_search` (this project's own history vs. general/live facts).
+- `langgraph_agent.py` picked up the tool automatically (shared `TOOLS`/prompts from `math_agent.py`).
+- Added `MEMORY_QUESTIONS` to the stress test — answers exist only in this repo's docs, so a pass proves retrieval, not recall.
+
+**Environment fix along the way**: weather/web-search stress test failures turned out to be an unrelated SSL certificate gap in this Python.framework install (never ran `Install Certificates.command`), not a regression. Fixed by running that script.
+
+**Stress test results** (both implementations, 36 cases = 34 existing + 2 memory):
+
+| Implementation | Pass rate | Mean latency | Max latency |
+|---|---|---|---|
+| Hand-rolled | 36 / 36 (100%) | ~4.79s | ~14.86s |
+| LangGraph (auto-approve) | 36 / 36 (100%) | ~4.59s | ~13.11s |
+
+**Key observations**:
+- A vector store is just another tool in the existing loop — no structural change needed.
+- Seeding once and persisting keeps repeated runs cheap.
+- Using the project's own docs as the knowledge base makes retrieval genuinely verifiable: the facts exist nowhere else.
+- Don't assume the latest change caused a failure — check whether it's environmental first.
+
+**Next steps for this experiment**:
+- Episodic memory (SQLite): store and recall past runs/corrections.
+- Prune/summarize long tool histories (short-term memory).
+- Try local knowledge first, web search as fallback.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -952,6 +987,7 @@ Use this section to track future additions to the notes.
 | 2026-08-23 | Added `trace_analyzer.py` to summarize trace files into latency, tool usage, guard, and reliability reports. |
 | 2026-08-23 | Rebuilt agent in LangGraph (`langgraph_agent.py`); added `--langgraph` stress-test flag; both implementations pass 34/34. |
 | 2026-08-29 | Added human-in-the-loop approval to the LangGraph agent using `interrupt()`; added `--auto-approve` to `stress_test.py`; both hand-rolled and LangGraph (auto-approve) pass 34/34. |
+| 2026-08-29 | Added local semantic memory / RAG (`memory.py`, `recall_knowledge` tool) over the project's own docs using Chroma + sentence-transformers; expanded stress test to 36 cases; fixed an unrelated SSL cert environment issue; both implementations pass 36/36. |
 
 ---
 

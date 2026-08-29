@@ -7,7 +7,8 @@ This agent started as a simple math assistant and evolved into a multi-tool agen
 3. Fetch live weather with `get_weather(city)`.
 4. Get today's date with `get_current_date()`.
 5. Search the web with `web_search(query)`.
-6. Combine tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”* or *“What is the temperature in Paris plus 10?”*
+6. Recall its own project history with `recall_knowledge(query)` — a local semantic memory / RAG store built from this repo's own docs.
+7. Combine tools to answer multi-step questions like *“What is the sum of the numbers in `data/numbers.txt`?”* or *“What is the temperature in Paris plus 10?”*
 
 It demonstrates the full agent loop with **tool selection, execution, and multi-turn planning**.
 
@@ -45,6 +46,7 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 
 - `math_agent.py` — the original hand-rolled agent implementation
 - `langgraph_agent.py` — the same agent rebuilt in LangGraph as a state machine
+- `memory.py` — local semantic memory / RAG store (Chroma + sentence-transformers) built from this repo's own docs
 - `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
 - `stress_test.py` — benchmark suite covering math, file reads, weather, web search, date, multi-step tasks, and non-math questions
@@ -62,6 +64,7 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 
 ```bash
 pip install ollama
+pip install chromadb sentence-transformers  # for recall_knowledge (local RAG)
 ```
 
 (Already installed in this environment.)
@@ -83,6 +86,7 @@ Try questions like:
 - `Who is the CEO of OpenAI?`
 - `What is today's date?`
 - `What is the capital of France?`
+- `Why did the first human-in-the-loop approval attempt in this project fail?`
 
 ## Run the stress test
 
@@ -90,7 +94,7 @@ Try questions like:
 python first_agent/stress_test.py
 ```
 
-The current suite covers 34 cases and passes all of them with `llama3.1:latest`.
+The current suite covers 36 cases and passes all of them with `llama3.1:latest`.
 
 ### Run the LangGraph version
 
@@ -104,7 +108,7 @@ python first_agent/stress_test.py --langgraph --auto-approve
 python first_agent/langgraph_agent.py
 ```
 
-Both implementations currently pass **34 / 34** cases with comparable latency.
+Both implementations currently pass **36 / 36** cases with comparable latency.
 
 ## Analyze traces
 
@@ -165,6 +169,22 @@ Returns today's date from the system clock in the format `YYYY-MM-DD (DayName)`,
 Searches the [DuckDuckGo Instant Answer API](https://duckduckgo.com/api) first, then falls back to the [Wikipedia API](https://www.mediawiki.org/wiki/API:Main_page) if DuckDuckGo has no result. No API key is required. Uses a small in-process cache and tries a few query variants (e.g., stripping "current", "who is", etc.) before giving up. Returns errors cleanly if no result is found.
 
 **Limitations**: DuckDuckGo Instant Answer is good for factual/entity queries (e.g., "President of Ghana") but not for real-time data like "today's date". For true live web search, a paid API such as Tavily or Serper is recommended.
+
+### `recall_knowledge(query)`
+
+Searches a local semantic memory store built from this project's own docs (`agentic-ai-learning.md`, `AGENTS_ROADMAP.md`, `first_agent/README.md`, `first_agent/development-log.md`). This is retrieval-augmented generation (RAG) applied to the project's own history:
+
+- On first use, the docs are chunked (by paragraph, merged up to ~800 characters) and embedded with `sentence-transformers` (`all-MiniLM-L6-v2`, runs locally, no API key).
+- Chunks + embeddings are persisted in a local Chroma collection at `first_agent/chroma_db/` (gitignored — it's derived data, rebuilt automatically from the docs).
+- A query embeds the question and returns the top-matching chunks, tagged with their source file, as the tool result — the answer-synthesis step then writes the final answer from those chunks, same as any other tool.
+
+Use it for questions about **this project's own design decisions, experiments, or past failures/fixes** — not general knowledge (that's `web_search`) or live external facts (`get_weather`). See the plan prompt's `recall_knowledge` example for how the two are distinguished.
+
+To force a re-seed after editing the source docs:
+
+```bash
+python first_agent/memory.py
+```
 
 ## Guards and reliability patterns
 
@@ -341,6 +361,7 @@ Traces are disabled during stress testing to keep the benchmark clean.
 13. A trace analyzer turns a folder of JSON traces into actionable metrics: duration per phase, tool usage, guard frequency, and common failure patterns.
 14. Rebuilding the same agent in LangGraph validates that the framework version behaves identically to the hand-rolled version while making the state machine explicit.
 15. Human-in-the-loop approval is easiest to implement correctly with native framework checkpoints (e.g., `langgraph.types.interrupt()`) rather than hand-rolled state-machine nodes. A naive `pending_approval` routing node can recurse before the outer loop ever pauses.
+16. A local semantic memory store (embeddings + vector search over the project's own docs) slots into the tool loop exactly like any other tool — the agent doesn't need to know it's RAG, it just gets a text result back. Seeding once and persisting to disk keeps repeated runs cheap.
 
 ## Next steps
 
@@ -349,7 +370,10 @@ Traces are disabled during stress testing to keep the benchmark clean.
 3. ~~Add a date/time tool so "today's date" works reliably without relying on search.~~ Done: added `get_current_date()`.
 4. ~~Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.~~ Done: added `trace_analyzer.py`.
 5. ~~Rebuild the agent in a framework to learn what frameworks abstract.~~ Done: rebuilt in LangGraph (`langgraph_agent.py`).
-6. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
-7. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
-8. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
-9. Add LangGraph persistence/checkpointing so a run can be paused and resumed.
+6. ~~Add human-in-the-loop approval before external tools.~~ Done: `interrupt()`-based approval gate in `langgraph_agent.py`.
+7. ~~Give the agent a local semantic memory store (RAG over its own docs).~~ Done: `recall_knowledge(query)` via `memory.py` (Chroma + sentence-transformers).
+8. Add episodic memory: store past runs/corrections (e.g., in SQLite) and let the agent recall past failures for a similar question.
+9. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
+10. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
+11. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
+12. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.

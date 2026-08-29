@@ -98,6 +98,20 @@ WEB_SEARCH_QUESTIONS = [
 
 # Date questions. The expected answer is today's date, so we generate the
 # expected substrings at runtime.
+# Memory / RAG questions. These ask about this project's own history, which
+# only exists in the local knowledge base (project docs), not general
+# training data or the web — a real test of retrieval, not recall.
+MEMORY_QUESTIONS = [
+    (
+        "Why did the first human-in-the-loop approval attempt in this project fail?",
+        ["await_approval"],
+    ),
+    (
+        "What local model does this project's math agent use by default?",
+        ["llama3.1"],
+    ),
+]
+
 DATE_QUESTIONS = [
     (
         "What is today's date?",
@@ -247,6 +261,13 @@ def main(run_agent=hand_rolled_run_agent, agent_label: str = "Hand-Rolled"):
         results.append(result)
         print_result(result)
 
+    # Memory / RAG questions.
+    print("\n--- Memory (RAG) Questions ---\n")
+    for question, expected_substrings in MEMORY_QUESTIONS:
+        result = run_single_test(question, expected_substrings=expected_substrings, run_agent=run_agent)
+        results.append(result)
+        print_result(result)
+
     # Date questions.
     print("\n--- Date Questions ---\n")
     for question, expected_substrings in DATE_QUESTIONS:
@@ -277,6 +298,7 @@ def main(run_agent=hand_rolled_run_agent, agent_label: str = "Hand-Rolled"):
     weather_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_QUESTIONS]]
     weather_math_results = [r for r in results if r["question"] in [q for q, _ in WEATHER_MATH_QUESTIONS]]
     web_search_results = [r for r in results if r["question"] in [q for q, _ in WEB_SEARCH_QUESTIONS]]
+    memory_results = [r for r in results if r["question"] in [q for q, _ in MEMORY_QUESTIONS]]
     date_results = [r for r in results if r["question"] in [q for q, _ in DATE_QUESTIONS]]
     non_math_results = [r for r in results if r["question"] in [q for q, _ in NON_MATH_QUESTIONS]]
     repeat_summary = repeat_results
@@ -287,6 +309,7 @@ def main(run_agent=hand_rolled_run_agent, agent_label: str = "Hand-Rolled"):
     passed_weather = sum(r["passed"] for r in weather_results)
     passed_weather_math = sum(r["passed"] for r in weather_math_results)
     passed_web_search = sum(r["passed"] for r in web_search_results)
+    passed_memory = sum(r["passed"] for r in memory_results)
     passed_date = sum(r["passed"] for r in date_results)
     passed_non_math = sum(r["passed"] for r in non_math_results)
     passed_repeat = sum(r["passed"] for r in repeat_summary)
@@ -305,6 +328,7 @@ def main(run_agent=hand_rolled_run_agent, agent_label: str = "Hand-Rolled"):
     print(f"Weather questions:    {passed_weather} / {len(weather_results)} passed")
     print(f"Weather + math:       {passed_weather_math} / {len(weather_math_results)} passed")
     print(f"Web search questions: {passed_web_search} / {len(web_search_results)} passed")
+    print(f"Memory (RAG):         {passed_memory} / {len(memory_results)} passed")
     print(f"Date questions:       {passed_date} / {len(date_results)} passed")
     print(f"Non-math questions:   {passed_non_math} / {len(non_math_results)} passed")
     print(f"Repetition test:      {passed_repeat} / {len(repeat_summary)} passed")

@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 *.pyo
 first_agent/traces/*.json
+first_agent/chroma_db/

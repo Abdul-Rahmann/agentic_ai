@@ -936,6 +936,51 @@ The max latency outlier in the LangGraph run was a single slow tool/network call
 
 ---
 
+## Experiment 12: Semantic Memory / RAG over the Project's Own Docs
+
+**Date**: 2026-08-29
+**Location**: `first_agent/memory.py`, `first_agent/math_agent.py`, `first_agent/stress_test.py`
+**Goal**: Give the agent a local, persistent knowledge base and a `recall_knowledge` tool, so it can answer questions about the project's own history via retrieval instead of guessing — the first piece of Phase 6 (Memory & RAG).
+
+### What was built
+
+- `memory.py`: a local RAG store using `chromadb` (persistent client, `first_agent/chroma_db/`) and `sentence-transformers` (`all-MiniLM-L6-v2` embeddings, runs locally, no API key).
+- `seed_knowledge_base()`: chunks `agentic-ai-learning.md`, `AGENTS_ROADMAP.md`, `first_agent/README.md`, and `first_agent/development-log.md` by paragraph (merged up to ~800 chars), embeds each chunk, and stores it with its source filename as metadata. Idempotent — skips re-embedding if the collection is already populated; `force=True` re-seeds.
+- `recall_knowledge(query)`: embeds the query, retrieves the top-3 most similar chunks, and returns them formatted as `From <source>: <chunk>` — the same string-in/string-out shape as every other tool.
+- Added `recall_knowledge` to `TOOLS` in `math_agent.py`, with a description and a worked example in the plan prompt (distinguishing it from `web_search`: project's own history vs. general/live facts).
+- Because `langgraph_agent.py` imports `TOOLS` and the prompt builders from `math_agent.py`, it picked up the new tool with no changes of its own.
+- Added `MEMORY_QUESTIONS` to `stress_test.py`: two questions whose answers only exist in this repo's own docs (not general training data), a genuine test of retrieval rather than recall.
+- Added `chroma_db/` to `.gitignore` — it's derived data, rebuilt automatically from the source docs.
+
+### Environment fix along the way
+
+The stress test's weather and web-search cases failed with `CERTIFICATE_VERIFY_FAILED` — unrelated to this change. This Python.framework install (macOS python.org installer) never had its bundled SSL certificate file set up, so `urllib` couldn't verify any HTTPS certificate (`curl`, which uses the system keychain, worked fine). Ran the official `Install Certificates.command` script to install `certifi` and symlink the cert bundle. Confirmed both APIs work after the fix.
+
+### Stress test results
+
+With the SSL fix applied, both implementations pass the expanded 36-case suite (34 existing + 2 memory questions):
+
+| Implementation | Pass rate | Mean latency | Max latency |
+|---|---|---|---|
+| Hand-rolled | 36 / 36 (100%) | ~4.79s | ~14.86s |
+| LangGraph (auto-approve) | 36 / 36 (100%) | ~4.59s | ~13.11s |
+
+### Key observations
+
+- A vector store slots into the existing tool-loop architecture without any structural change — the agent doesn't need to know `recall_knowledge` is RAG; it's just another tool that returns text.
+- Seeding once and persisting to disk (rather than re-embedding every run) keeps repeated runs fast; only the first call after a fresh clone pays the embedding cost.
+- Using the project's own documentation as the knowledge base is a good way to validate retrieval end-to-end: the facts genuinely don't exist anywhere else (not in the model's training data, not on the web), so a passing test proves the retrieval path actually worked.
+- The plan prompt needed an explicit rule distinguishing `recall_knowledge` (this project's own history) from `web_search` (general/live facts) — otherwise the model's tool choice was ambiguous for project-related questions.
+- Environment issues (like the SSL cert gap) can masquerade as regressions in a stress test. Worth checking whether a failure is new before assuming the latest change caused it.
+
+### What this enables next
+
+- Episodic memory: store past runs/corrections (e.g., SQLite) so the agent can recall "you got this wrong before" for a similar question — the other half of Phase 6.
+- Short-term memory improvements: summarize/prune long tool histories instead of keeping every result verbatim.
+- Combine `recall_knowledge` with `web_search`: check local knowledge first, fall back to the web only if nothing relevant is found.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -969,5 +1014,7 @@ The max latency outlier in the LangGraph run was a single slow tool/network call
 - [x] Build a trace analyzer script that reports pass rate, latency, and common failure modes across many runs.
 - [x] Rebuild the agent in LangGraph.
 - [x] Add human-in-the-loop approval before external tools in LangGraph.
+- [x] Add a local semantic memory / RAG store (`recall_knowledge`) over the project's own docs.
+- [ ] Add episodic memory (store and recall past runs/corrections).
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
 - [ ] Add LangGraph persistence/checkpointing across process restarts.
