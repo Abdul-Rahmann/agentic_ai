@@ -4,3 +4,8 @@ __pycache__/
 first_agent/traces/*.json
 first_agent/chroma_db/
 first_agent/.memory_fingerprint
+first_agent/episodes.db
+first_agent/test_episodes.db
+first_agent/stress_test_episodes.db
+first_agent/my_local_transformer/
+first_agent/main.ipynb

@@ -1021,6 +1021,56 @@ Both implementations pass the full 36-case suite after all three fixes:
 
 ---
 
+## Experiment 13: Episodic Memory
+
+**Date**: 2026-09-03
+**Location**: `first_agent/episodic_memory.py`, `first_agent/math_agent.py`, `first_agent/test_episodic_memory.py`, `first_agent/stress_test.py`
+**Goal**: Give the agent memory of its own past runs — the other half of Phase 6 — so a reflection-flagged mistake on one run gets surfaced (and avoided) on a later run of a similar question, not just within the same run's retry loop.
+
+### What was built
+
+- `episodic_memory.py`: `record_episode(question, final_answer, verified, reflection_feedback)` inserts a row into a SQLite table (`first_agent/episodes.db`, gitignored — runtime state, not source); `recall_similar_episode(question)` returns the best-matching past *unverified* episode, if any.
+- Wired into `math_agent.py`'s `run_agent()`: before the first attempt, `recall_similar_episode` is checked and — if a past failure matches — its explanation is appended to `reflection_feedback`, the exact same list the in-run retry loop already feeds into the plan/answer prompts. No prompt-building code needed to change. After the run, if reflection reached a real verdict (skips tool-error exits and `reflect=False` runs), `record_episode` saves the outcome.
+- `test_episodic_memory.py`: mocks the LLM to always answer wrong on a fresh question (Run 1, gets recorded as unverified), then simulates a corrected answer specifically when the prompt contains the episodic hint (Run 2, a paraphrase of Run 1's question). Proves the outcome actually changes, not just that the feedback text reaches the prompt.
+- Not yet ported to `langgraph_agent.py` — scoped to the hand-rolled agent first, matching how tools/reflection/retry were each built once in `math_agent.py` before the LangGraph port happened as its own exercise (Experiment 10).
+
+### Bug found immediately: character-level similarity was too strict
+
+First version matched questions with `difflib.SequenceMatcher` on normalized text. `"What is 15 * 23?"` vs `"What is 15 times 23?"` scored only **0.83** similarity — below the 0.85 threshold — purely because `*` and `times` share almost no characters, even though they mean the same thing. This is the exact keyword-vs-meaning gap `memory.py`'s RAG store already had to solve.
+
+**Fix**: reused `memory.py`'s already-loaded `_EMBEDDING_FN` (the same `all-MiniLM-L6-v2` model) to embed the query and candidate past questions, and rank by cosine similarity (threshold 0.7) instead of character diffing. The same paraphrase now scores **0.896**. `episodic_memory.py` still uses SQLite for the structured record — that part was never the problem — just not for the similarity matching.
+
+### Bug found by the stress test: a fragile relative path
+
+Wiring episodic memory into the benchmark (isolating it into `stress_test_episodes.db` so past benchmark runs can't influence future ones — the same principle as `trace=False`) used a *relative* path (`os.path.join("first_agent", "stress_test_episodes.db")`), which only resolves correctly if the script is run from the repo root. Run from inside `first_agent/` itself, it tried to open a nonexistent `first_agent/first_agent/` directory, and `sqlite3.connect()` raised — **uncaught, because the episodic recall call sat outside `run_agent`'s `try/except`** — crashing every single one of the 36 stress-test questions before the LLM was even called (0/36, 0.00s mean response time was the tell).
+
+**Fix, two parts**:
+1. Anchor the path to `__file__`, the same pattern every other path in this codebase already uses (`PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))`).
+2. Wrap both the recall and the record calls in `run_agent` in their own `try/except`, matching how every tool call already degrades to an `"Error: ..."` string instead of crashing the run. A memory-layer failure should mean "no episodic hint this time," not "the agent is down."
+
+### Stress test results
+
+Both implementations pass the full 36-case suite (LangGraph doesn't have episodic memory yet, so this just confirms nothing broke):
+
+| Implementation | Pass rate |
+|---|---|
+| Hand-rolled | 36 / 36 (100%) |
+| LangGraph (auto-approve) | 36 / 36 (100%) |
+
+### Key observations
+
+- The same "character similarity isn't semantic similarity" lesson showed up in a second, unrelated place within one work session — worth treating as a general rule, not a one-off memory.py quirk: reach for embeddings whenever "does this mean the same thing" matters, not "does this look the same."
+- A call that sits outside a function's `try/except` because it was added later is exactly the kind of thing that turns a small isolated bug into a total outage. New logic should default to being wrapped as defensively as the code around it, not assumed safe because it "should just work."
+- Reusing an existing mechanism (`reflection_feedback`) instead of building a parallel one for episodic hints kept the integration to a few lines in `run_agent` and zero changes to prompt-building code.
+
+### What this enables next
+
+- Port episodic memory to `langgraph_agent.py` (add the same recall/record calls to `plan_node`/`reflect_node`).
+- Only-unverified recall means a *correct* past answer is never surfaced — fine for now, but a "you answered this correctly before" fast-path (skip re-deriving) is a natural efficiency follow-up.
+- Short-term memory (summarizing/pruning long `tool_history`) is the one remaining open box in Phase 6.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -1055,6 +1105,7 @@ Both implementations pass the full 36-case suite after all three fixes:
 - [x] Rebuild the agent in LangGraph.
 - [x] Add human-in-the-loop approval before external tools in LangGraph.
 - [x] Add a local semantic memory / RAG store (`recall_knowledge`) over the project's own docs.
-- [ ] Add episodic memory (store and recall past runs/corrections).
+- [x] Add episodic memory (store and recall past runs/corrections).
+- [ ] Port episodic memory to the LangGraph agent.
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
 - [ ] Add LangGraph persistence/checkpointing across process restarts.

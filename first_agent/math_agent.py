@@ -28,6 +28,7 @@ import time
 
 import ollama
 
+from episodic_memory import format_episode_feedback, recall_similar_episode, record_episode
 from memory import recall_knowledge
 from tracer import NullTrace, Trace, current_ms
 
@@ -521,6 +522,24 @@ def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect:
     reflection_feedback = []
     final_answer = None
     last_reflection_text = None
+    final_verified = None  # None = reflection never ran to completion this run
+
+    # Episodic memory: if a similar question was answered incorrectly in a
+    # past run, surface that as feedback before the first attempt even
+    # starts — reusing the same reflection_feedback mechanism the in-run
+    # retry loop already uses, so no prompt-building code needs to change.
+    # Wrapped defensively, like every tool call already is: a memory-layer
+    # failure should degrade to "no episodic hint," not crash the run.
+    try:
+        past_episode = recall_similar_episode(question)
+        if past_episode:
+            episode_note = format_episode_feedback(past_episode)
+            reflection_feedback.append(episode_note)
+            if verbose:
+                print(f"[Episodic Memory] {episode_note}")
+    except Exception as e:
+        if verbose:
+            print(f"[Episodic Memory] recall failed, continuing without it: {e}")
 
     try:
         for attempt in range(max_retries + 1):
@@ -660,6 +679,7 @@ def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect:
                 )
 
                 if verified:
+                    final_verified = True
                     if verbose:
                         print(f"[Retry] Answer verified on attempt {attempt + 1}.")
                     break
@@ -674,6 +694,7 @@ def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect:
                     final_answer = None
                 else:
                     # No more retries. Return the answer with a warning.
+                    final_verified = False
                     final_answer = f"[Unverified after {max_retries} retries: {reflection_text}] {final_answer}"
             else:
                 # Reflection disabled; accept the first answer.
@@ -684,6 +705,23 @@ def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect:
         tracer.error = str(e)
         if verbose:
             print(f"[Error] {e}")
+
+    # Record this run for episodic recall, but only when reflection actually
+    # reached a verdict (skips tool-error exits and reflect=False runs,
+    # where there's no meaningful correctness signal to remember). Wrapped
+    # defensively so a memory-layer failure can't lose an otherwise-good
+    # answer the user is about to receive.
+    if final_verified is not None:
+        try:
+            record_episode(
+                question,
+                final_answer,
+                verified=final_verified,
+                reflection_feedback=None if final_verified else last_reflection_text,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[Episodic Memory] record failed, continuing: {e}")
 
     total_duration = current_ms() - run_start
     tracer.finalize(final_answer, total_duration, tracer.error)

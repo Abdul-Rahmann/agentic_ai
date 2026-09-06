@@ -948,6 +948,34 @@ Max response time:    11.75s
 
 ---
 
+### Experiment 13: Episodic Memory
+
+**Date**: 2026-09-03
+**Location**: `first_agent/episodic_memory.py`, `first_agent/math_agent.py`, `first_agent/test_episodic_memory.py`
+**Goal**: Give the agent memory of its own past runs, so a reflection-flagged mistake gets avoided on a later, separate run of a similar question — not just within one run's retry loop (the other half of Phase 6).
+
+**What was built**:
+- `episodic_memory.py`: SQLite-backed `record_episode()` / `recall_similar_episode()`. Wired into `math_agent.py`'s `run_agent()` by seeding `reflection_feedback` with a past failure's explanation before the first attempt — reusing the existing retry-loop mechanism rather than building a parallel one.
+- `test_episodic_memory.py`: proves the outcome actually changes across two separate `run_agent()` calls (a mocked "wrong answer" run gets recorded, then a paraphrased question in a new call self-corrects because of the recalled feedback), not just that text reached the prompt.
+- Not yet ported to `langgraph_agent.py`.
+
+**Two bugs found immediately by testing**:
+1. Character-level similarity (`difflib`) scored `"15 * 23"` vs `"15 times 23"` at 0.83 — below threshold — the same keyword-vs-meaning gap `memory.py` already solved. Fixed by reusing `memory.py`'s embedding model for cosine similarity instead (0.896 for the same pair).
+2. A relative path for the benchmark's isolated episode DB only worked when run from the repo root; run from inside `first_agent/`, it crashed every single stress-test question (0/36) because the recall call sat outside `run_agent`'s `try/except`. Fixed the path (anchor to `__file__`, like every other path in this codebase) and wrapped both the recall and record calls defensively, matching how every tool call already degrades instead of crashing.
+
+**Stress test results**: both implementations pass 36/36 (LangGraph doesn't have episodic memory yet — this just confirms nothing broke).
+
+**Key observations**:
+- The same "lexical similarity isn't semantic similarity" problem showed up in a second, unrelated place in one session — worth treating as a general rule.
+- New logic should be wrapped as defensively as the code around it by default, not assumed safe.
+- Reusing an existing mechanism (`reflection_feedback`) kept the integration to a few lines with zero prompt-building changes.
+
+**Next steps for this experiment**:
+- Port episodic memory to the LangGraph agent.
+- Short-term memory (summarize/prune long tool histories) — the last open box in Phase 6.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -989,6 +1017,7 @@ Use this section to track future additions to the notes.
 | 2026-08-29 | Added human-in-the-loop approval to the LangGraph agent using `interrupt()`; added `--auto-approve` to `stress_test.py`; both hand-rolled and LangGraph (auto-approve) pass 34/34. |
 | 2026-08-29 | Added local semantic memory / RAG (`memory.py`, `recall_knowledge` tool) over the project's own docs using Chroma + sentence-transformers; expanded stress test to 36 cases; fixed an unrelated SSL cert environment issue; both implementations pass 36/36. |
 | 2026-08-29 | Fixed two `memory.py` gaps found by manual testing: chunking is now heading-aware (never spans two sections) for better retrieval, and seeding is fingerprint-based (auto re-seeds on doc changes, not just on an empty collection). Also fixed a brittle stress-test assertion pattern (one exact substring required) that was flagging factually-correct, differently-phrased answers as failures. |
+| 2026-09-03 | Added episodic memory (`episodic_memory.py`, SQLite): the agent now recalls a reflection-flagged mistake from a past run and avoids repeating it in a new one. Fixed a similarity-matching bug (character-level diffing scored a valid paraphrase too low; switched to embedding-based cosine similarity) and a crash bug (relative DB path only worked from the repo root, and the recall call wasn't defensively wrapped) found while testing. Hand-rolled agent only so far; both implementations still pass 36/36. |
 
 ---
 

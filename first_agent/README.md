@@ -47,10 +47,12 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 - `math_agent.py` — the original hand-rolled agent implementation
 - `langgraph_agent.py` — the same agent rebuilt in LangGraph as a state machine
 - `memory.py` — local semantic memory / RAG store (Chroma + sentence-transformers) built from this repo's own docs
+- `episodic_memory.py` — SQLite-backed record of past runs; recalls a reflection-flagged mistake on a later, similar question
 - `tracer.py` — structured trace recorder
 - `data/numbers.txt` — sample data file for read-file and multi-step tests
-- `stress_test.py` — benchmark suite covering math, file reads, weather, web search, date, multi-step tasks, and non-math questions
+- `stress_test.py` — benchmark suite covering math, file reads, weather, web search, date, memory (RAG), multi-step tasks, and non-math questions
 - `test_retry.py` — unit-style test that exercises the reflection retry loop with a mocked LLM
+- `test_episodic_memory.py` — unit-style test proving a mistake recorded in one `run_agent()` call is recalled and corrected in a separate, later call
 - `trace_analyzer.py` — report generator that reads trace JSON files and summarizes latency, tool usage, guards, and failures
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
@@ -365,6 +367,9 @@ Traces are disabled during stress testing to keep the benchmark clean.
 14. Rebuilding the same agent in LangGraph validates that the framework version behaves identically to the hand-rolled version while making the state machine explicit.
 15. Human-in-the-loop approval is easiest to implement correctly with native framework checkpoints (e.g., `langgraph.types.interrupt()`) rather than hand-rolled state-machine nodes. A naive `pending_approval` routing node can recurse before the outer loop ever pauses.
 16. A local semantic memory store (embeddings + vector search over the project's own docs) slots into the tool loop exactly like any other tool — the agent doesn't need to know it's RAG, it just gets a text result back. Seeding once and persisting to disk keeps repeated runs cheap.
+17. Episodic memory (recalling the agent's own past runs) can reuse the exact same `reflection_feedback` plumbing the in-run retry loop already has — a past failure is just feedback from "attempt 0," seeded before the loop starts, not a new mechanism.
+18. Character-level string similarity (e.g. `difflib`) is not semantic similarity: `"15 * 23"` vs `"15 times 23"` scored well below a reasonable match threshold despite meaning the same thing. Reach for embeddings whenever "does this mean the same thing" matters more than "does this look the same."
+19. New code paths should be wrapped as defensively as the code around them by default. An episodic-memory call added outside `run_agent`'s existing `try/except` turned one path bug into a 100% failure rate across the whole stress suite instead of a graceful "no hint this time."
 
 ## Next steps
 
@@ -375,8 +380,10 @@ Traces are disabled during stress testing to keep the benchmark clean.
 5. ~~Rebuild the agent in a framework to learn what frameworks abstract.~~ Done: rebuilt in LangGraph (`langgraph_agent.py`).
 6. ~~Add human-in-the-loop approval before external tools.~~ Done: `interrupt()`-based approval gate in `langgraph_agent.py`.
 7. ~~Give the agent a local semantic memory store (RAG over its own docs).~~ Done: `recall_knowledge(query)` via `memory.py` (Chroma + sentence-transformers).
-8. Add episodic memory: store past runs/corrections (e.g., in SQLite) and let the agent recall past failures for a similar question.
-9. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
-10. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
-11. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
-12. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.
+8. ~~Add episodic memory: store past runs/corrections and let the agent recall past failures for a similar question.~~ Done: `episodic_memory.py` (SQLite), wired into `math_agent.py`'s `run_agent()`.
+9. Port episodic memory to `langgraph_agent.py`.
+10. Add short-term memory: summarize/prune long tool histories — the last open item in Phase 6.
+11. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
+12. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
+13. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
+14. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.

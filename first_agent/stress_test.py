@@ -22,6 +22,16 @@ import sys
 sys.path.insert(0, "first_agent")
 from math_agent import run_agent as hand_rolled_run_agent
 from langgraph_agent import run_agent as langgraph_run_agent
+import episodic_memory
+
+# Isolate episodic memory into its own throwaway DB during benchmark runs,
+# the same principle as trace=False: a stress test that let past runs'
+# outcomes influence future runs (e.g. a flagged answer getting "corrected"
+# by episodic feedback next time) would no longer be a reproducible,
+# apples-to-apples benchmark. Reset fresh on every stress_test.py run.
+episodic_memory.DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stress_test_episodes.db")
+if os.path.exists(episodic_memory.DB_PATH):
+    os.remove(episodic_memory.DB_PATH)
 
 DATA_DIR = "first_agent/data"
 
