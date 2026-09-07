@@ -53,6 +53,7 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 - `stress_test.py` — benchmark suite covering math, file reads, weather, web search, date, memory (RAG), multi-step tasks, and non-math questions
 - `test_retry.py` — unit-style test that exercises the reflection retry loop with a mocked LLM
 - `test_episodic_memory.py` — unit-style test proving a mistake recorded in one `run_agent()` call is recalled and corrected in a separate, later call
+- `test_pruning.py` — unit-style test of short-term memory management: summarization threshold, tool-history cap, error passthrough
 - `trace_analyzer.py` — report generator that reads trace JSON files and summarizes latency, tool usage, guards, and failures
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
@@ -185,11 +186,23 @@ Use it for questions about **this project's own design decisions, experiments, o
 
 **Known limitation**: retrieval ranks by embedding similarity, which isn't the same as "topically correct" — a loosely-phrased query can surface mediocre matches even when a better chunk exists in the store. Reflection only checks that the answer is consistent with what was retrieved, not that the right chunk was retrieved in the first place, so a wrong-but-consistent answer can still get a `VERIFIED` stamp. Treat this tool as "usually right," not "provably right," until retrieval quality is evaluated more rigorously.
 
-To force a re-seed after editing the source docs:
+### Try it yourself
 
 ```bash
-python first_agent/memory.py
+python first_agent/memory.py   # force a re-seed (also after editing the source docs) + runs 2 sample queries
+
+python3 -c "
+from memory import recall_knowledge
+print(recall_knowledge('what tools does this agent have'))
+"
+
+python3 -c "
+from math_agent import run_agent
+print(run_agent('Why did the first human-in-the-loop approval attempt fail?', verbose=True, trace=False))
+"
 ```
+
+Watch the `[Plan]` line on the last command — it should show `{"tool": "recall_knowledge", ...}` for a project-specific question like this one, and should *not* fire for a general-knowledge question (try `"What is the capital of Japan?"` to confirm).
 
 ## Guards and reliability patterns
 
@@ -232,7 +245,11 @@ This pattern catches cases where the final answer synthesis drifted from the too
 Final result: 345
 ```
 
-Run `python first_agent/test_retry.py` to execute this test.
+### Try it yourself
+
+```bash
+python first_agent/test_retry.py
+```
 
 ## Hand-rolled vs. LangGraph
 
@@ -276,6 +293,8 @@ plan --[tool needed]--> execute --[needs approval]--> (human) --> execute --> pl
 
 The LangGraph agent can pause before high-risk or external tools (`web_search`, `get_weather`) and ask the user for approval. This is implemented with LangGraph's `interrupt()` checkpoint.
 
+### Try it yourself
+
 Run interactively with approval enabled (default):
 
 ```bash
@@ -298,6 +317,36 @@ python first_agent/stress_test.py --langgraph --auto-approve
 ```
 
 Auto-approve bypasses the interrupt and lets external tools run without prompting. It is useful for headless/CI runs, but it removes the safety gate.
+
+## Memory management (hand-rolled agent only)
+
+Beyond `recall_knowledge` (a tool the agent chooses to call), `math_agent.py`'s `run_agent()` manages two other kinds of memory automatically, with no tool call involved:
+
+**Episodic memory** (`episodic_memory.py`): before the first attempt, `recall_similar_episode(question)` checks a local SQLite store (`episodes.db`) for a past run on a similar question. If that past run was flagged incorrect by reflection, its explanation is seeded into `reflection_feedback` — the same list the in-run retry loop already uses — so the agent starts already warned about a mistake it made in a *previous, separate* run. After each run where reflection reaches a verdict, the outcome is recorded for next time. Matching is by embedding similarity (reusing `memory.py`'s model), not exact string matching, so a paraphrased repeat of a failed question still gets recognized.
+
+**Short-term memory** (in `math_agent.py`): any single tool result over `MAX_TOOL_RESULT_CHARS` (1000) gets summarized via an LLM call before being stored in `tool_history` — the trace still keeps the full raw result, only what feeds back into future prompts shrinks. If `tool_history` itself grows past `MAX_TOOL_HISTORY_ENTRIES` (6) entries, the oldest are collapsed into one combined summary, keeping the 5 most recent in full detail.
+
+Both are wrapped defensively — a failure in either degrades to "no hint" / "no summarization," never crashes the run.
+
+### Try it yourself
+
+Automated (mocked, deterministic — proves the mechanism):
+
+```bash
+python first_agent/test_episodic_memory.py   # a mistake is recalled and corrected across separate run_agent() calls
+python first_agent/test_pruning.py           # summarization/capping trigger at the right thresholds
+```
+
+Live (real model, real `recall_knowledge` result — proves it end-to-end):
+
+```bash
+python3 -c "
+from math_agent import run_agent
+print(run_agent('Why did the first human-in-the-loop approval attempt in this project fail?', verbose=True, trace=False))
+"
+```
+
+Look for a `[Prune] Summarized recall_knowledge result: N -> M chars` line — that's short-term memory firing on a real ~2300-char retrieval result, and the final answer should still be correct and specific (not a vague generality) despite the summarization.
 
 ## Observability
 
@@ -370,6 +419,8 @@ Traces are disabled during stress testing to keep the benchmark clean.
 17. Episodic memory (recalling the agent's own past runs) can reuse the exact same `reflection_feedback` plumbing the in-run retry loop already has — a past failure is just feedback from "attempt 0," seeded before the loop starts, not a new mechanism.
 18. Character-level string similarity (e.g. `difflib`) is not semantic similarity: `"15 * 23"` vs `"15 times 23"` scored well below a reasonable match threshold despite meaning the same thing. Reach for embeddings whenever "does this mean the same thing" matters more than "does this look the same."
 19. New code paths should be wrapped as defensively as the code around them by default. An episodic-memory call added outside `run_agent`'s existing `try/except` turned one path bug into a 100% failure rate across the whole stress suite instead of a graceful "no hint this time."
+20. A general prompt rule ("preserve exact identifiers") needs a worked example in the *same shape* as the real input to reliably transfer. A prose-shaped example didn't stop the model from dropping every result value when summarizing a `name(input) -> result`-shaped tool history — it took a second example in that exact shape to fix.
+21. "Summarize" and "extract facts" are different asks to a small model with different failure modes: summarization drifts toward describing the topic, fact extraction stays anchored to specifics. Ask for facts when the specifics are the answer.
 
 ## Next steps
 
@@ -381,9 +432,10 @@ Traces are disabled during stress testing to keep the benchmark clean.
 6. ~~Add human-in-the-loop approval before external tools.~~ Done: `interrupt()`-based approval gate in `langgraph_agent.py`.
 7. ~~Give the agent a local semantic memory store (RAG over its own docs).~~ Done: `recall_knowledge(query)` via `memory.py` (Chroma + sentence-transformers).
 8. ~~Add episodic memory: store past runs/corrections and let the agent recall past failures for a similar question.~~ Done: `episodic_memory.py` (SQLite), wired into `math_agent.py`'s `run_agent()`.
-9. Port episodic memory to `langgraph_agent.py`.
-10. Add short-term memory: summarize/prune long tool histories — the last open item in Phase 6.
-11. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
-12. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
-13. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
-14. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.
+9. ~~Add short-term memory: summarize/prune long tool histories.~~ Done — Phase 6 is now fully checked off.
+10. Port episodic memory and short-term pruning to `langgraph_agent.py`.
+11. Move to Phase 7 (Multi-Agent): a role-separated team (e.g. planner + executor, or critic + actor) instead of one agent doing everything.
+12. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
+13. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
+14. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
+15. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.

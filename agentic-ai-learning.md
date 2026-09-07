@@ -976,6 +976,35 @@ Max response time:    11.75s
 
 ---
 
+### Experiment 14: Short-Term Memory (Summarize/Prune Tool History)
+
+**Date**: 2026-09-06
+**Location**: `first_agent/math_agent.py`, `first_agent/test_pruning.py`
+**Goal**: Close the last open box in Phase 6 — keep long tool results and long `tool_history` from bloating every future prompt within a run.
+
+**What was built**:
+- A tool result over `MAX_TOOL_RESULT_CHARS` (1000, chosen to catch `recall_knowledge`'s ~2280-char typical output while leaving `web_search`'s ~820 chars alone) gets summarized before being stored in `tool_history`. Error results are never summarized.
+- `tool_history` over `MAX_TOOL_HISTORY_ENTRIES` (6) gets its oldest entries collapsed into one summary, keeping the 5 most recent in full.
+- The trace still records the full raw result — pruning only affects what feeds back into future prompts, not observability.
+- `test_pruning.py`: mocked, deterministic tests of the mechanism (threshold, cap, error passthrough).
+
+**Two real prompt failures found by testing on actual data**:
+1. A plain "summarize in 2-4 sentences" prompt fed the real `recall_knowledge` output for a stress-test question and produced a generic paragraph that **dropped the literal `await_approval` identifier and the actual answer**. Fixed by reframing as fact extraction (a bullet list, every bullet must contain a concrete detail) with a worked example.
+2. That fix didn't generalize: a direct unit test on collapsing 8 `calculate` calls showed the summary preserving *inputs* but **dropping every result value** — because the only example was prose-shaped, not `name(input) -> result`-shaped. Fixed with an explicit rule plus a second example in that exact shape.
+
+**Stress test results**: both implementations pass 36/36 (LangGraph doesn't have this yet). Max response time got noisier (17–41s vs. 13–18s before) — the real cost of an extra LLM call whenever summarization triggers.
+
+**Key observations**:
+- The same "a general rule needs a worked example in the same shape as the real input" lesson from `memory.py` showed up again in a new form.
+- "Summarize" and "extract facts" produce different failure modes in a small model — summarization drifts toward describing the topic, fact extraction stays anchored to specifics. Ask for facts when the specifics are the answer.
+- The `_prune_tool_history` bug was caught by a targeted unit test, not the stress suite — no current question triggers 6+ tool calls, a reminder that passing tests only prove the paths they exercise.
+
+**Next steps for this experiment**:
+- Port short-term pruning to the LangGraph agent.
+- Phase 6 is now fully checked off. Natural next phase: Phase 7 (Multi-Agent).
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -1018,6 +1047,7 @@ Use this section to track future additions to the notes.
 | 2026-08-29 | Added local semantic memory / RAG (`memory.py`, `recall_knowledge` tool) over the project's own docs using Chroma + sentence-transformers; expanded stress test to 36 cases; fixed an unrelated SSL cert environment issue; both implementations pass 36/36. |
 | 2026-08-29 | Fixed two `memory.py` gaps found by manual testing: chunking is now heading-aware (never spans two sections) for better retrieval, and seeding is fingerprint-based (auto re-seeds on doc changes, not just on an empty collection). Also fixed a brittle stress-test assertion pattern (one exact substring required) that was flagging factually-correct, differently-phrased answers as failures. |
 | 2026-09-03 | Added episodic memory (`episodic_memory.py`, SQLite): the agent now recalls a reflection-flagged mistake from a past run and avoids repeating it in a new one. Fixed a similarity-matching bug (character-level diffing scored a valid paraphrase too low; switched to embedding-based cosine similarity) and a crash bug (relative DB path only worked from the repo root, and the recall call wasn't defensively wrapped) found while testing. Hand-rolled agent only so far; both implementations still pass 36/36. |
+| 2026-09-06 | Added short-term memory management: long tool results get summarized before entering `tool_history`, and `tool_history` itself gets capped with older entries collapsed. Fixed two prompt failures found by testing on real data (narrative summarization dropped the key identifier; the fix didn't generalize to `name(input) -> result`-shaped tool history until a matching example was added). Phase 6 is now fully checked off. Hand-rolled agent only so far; both implementations still pass 36/36. |
 
 ---
 

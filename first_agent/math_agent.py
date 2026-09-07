@@ -36,6 +36,15 @@ MODEL = os.getenv("AGENT_MODEL", "llama3.1:latest")
 USE_OPENAI = os.getenv("USE_OPENAI", "0") == "1"
 MAX_TOOL_STEPS = 5
 
+# Short-term memory management: an individual tool result longer than this
+# gets summarized before being stored in tool_history (it's still recorded
+# in full in the trace — only what feeds back into future prompts shrinks).
+# Once tool_history itself grows past this many entries, the oldest ones
+# are collapsed into a single summarized entry, keeping only the most
+# recent MAX_TOOL_HISTORY_ENTRIES - 1 in full detail.
+MAX_TOOL_RESULT_CHARS = 1000
+MAX_TOOL_HISTORY_ENTRIES = 6
+
 # Root directory for file reads. Absolute paths outside this are blocked.
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -513,6 +522,67 @@ def _parse_reflection(reflection_output: str) -> tuple[bool, str]:
     return True, text
 
 
+# -----------------------------------------------------------------------------
+# Short-term memory: summarize/prune tool_history
+# -----------------------------------------------------------------------------
+
+
+_SUMMARIZE_SYSTEM_PROMPT = """Extract the specific facts from the following text as a short bullet list, for use as context in a later step. This is fact extraction, not a narrative summary — do not generalize, editorialize, or describe the text's topic at a high level.
+
+Rules:
+1. Every bullet must contain at least one concrete, specific detail: an exact number, name, file name, function/variable/identifier, error message, or quoted phrase from the text.
+2. Do NOT write a generic bullet like "Discusses the approval system" — write what specifically happened, e.g. "The await_approval node caused infinite recursion."
+3. If a line is shaped like "name(input) -> result", you MUST keep both the input AND the exact result value — the result is usually the fact that matters most. Never summarize away a "-> result" into just "was called with input X".
+4. Keep only facts relevant to answering a question about this text — drop unrelated tangents.
+5. Output ONLY the bullet list, no preamble.
+
+Example 1 (prose):
+Text: "The execute_node returned {'pending_approval': pending} when approval was needed. An await_approval node acted as a pause point. This produced an infinite execute -> await_approval -> execute loop before the outer input() was ever called."
+Bullets:
+- execute_node returned {"pending_approval": pending} to request approval
+- an await_approval node was meant to pause execution but instead caused infinite recursion: execute -> await_approval -> execute
+- the loop never reached the outer input() call
+
+Example 2 (tool call history — keep every result):
+Text: "calculate(2 + 2) -> 4\ncalculate(10 * 5) -> 50\nread_file(data.txt) -> Error: file not found"
+Bullets:
+- calculate(2 + 2) -> 4
+- calculate(10 * 5) -> 50
+- read_file(data.txt) -> Error: file not found"""
+
+
+def _summarize_text(label: str, text: str) -> str:
+    """Summarize a long piece of text via the LLM, preserving exact identifiers/numbers."""
+    messages = [
+        {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
+        {"role": "user", "content": f"{label}:\n\n{text}"},
+    ]
+    return _clean_answer(chat(messages))
+
+
+def _maybe_summarize_tool_result(tool_name: str, tool_input: str, result: str) -> str:
+    """Summarize a tool result if it's long enough to bloat every future prompt this run."""
+    if len(result) <= MAX_TOOL_RESULT_CHARS or result.startswith("Error:"):
+        return result
+    return _summarize_text(f"Tool result from {tool_name}({tool_input!r})", result)
+
+
+def _prune_tool_history(tool_history: list) -> list:
+    """Collapse older tool_history entries into one summary once it grows past the cap.
+
+    Keeps the most recent MAX_TOOL_HISTORY_ENTRIES - 1 entries in full detail;
+    everything older is condensed into a single combined entry.
+    """
+    if len(tool_history) <= MAX_TOOL_HISTORY_ENTRIES:
+        return tool_history
+
+    keep_recent = MAX_TOOL_HISTORY_ENTRIES - 1
+    older, recent = tool_history[:-keep_recent], tool_history[-keep_recent:]
+    combined = "\n".join(f"{name}({inp}) -> {res}" for name, inp, res in older)
+    summary = _summarize_text("Earlier tool calls in this run", combined)
+    return [("history_summary", f"{len(older)} earlier tool call(s)", summary)] + recent
+
+
 def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect: bool = True, max_retries: int = 2) -> str:
     provider = "OpenAI" if USE_OPENAI else "Ollama"
     tracer = Trace(question, MODEL, provider) if trace else NullTrace()
@@ -634,7 +704,14 @@ def run_agent(question: str, verbose: bool = False, trace: bool = True, reflect:
                     )
                     break
 
-                tool_history.append((tool_name, tool_input, result))
+                # Store a summarized version if the raw result is large — the
+                # trace above already kept the full raw result for post-hoc
+                # analysis; only what feeds back into future prompts shrinks.
+                stored_result = _maybe_summarize_tool_result(tool_name, tool_input, result)
+                if verbose and stored_result != result:
+                    print(f"[Prune] Summarized {tool_name} result: {len(result)} -> {len(stored_result)} chars")
+                tool_history.append((tool_name, tool_input, stored_result))
+                tool_history = _prune_tool_history(tool_history)
 
             # Final answer phase: synthesize the gathered information.
             if final_answer is None:

@@ -1071,6 +1071,56 @@ Both implementations pass the full 36-case suite (LangGraph doesn't have episodi
 
 ---
 
+## Experiment 14: Short-Term Memory (Summarize/Prune Tool History)
+
+**Date**: 2026-09-06
+**Location**: `first_agent/math_agent.py`, `first_agent/test_pruning.py`
+**Goal**: Close the last open box in Phase 6 — keep `tool_history` from bloating every future prompt within a run, either because one tool result is very large (`recall_knowledge` typically returns ~2300 chars) or because many tool calls accumulate.
+
+### What was built
+
+- `MAX_TOOL_RESULT_CHARS = 1000`: an individual tool result longer than this gets summarized via `_maybe_summarize_tool_result()` before being stored in `tool_history` — chosen because it sits above `web_search`'s typical output (~820 chars, untouched) but below `recall_knowledge`'s (~2280 chars, the real target). Error results (`"Error: ..."`) are never summarized — there's nothing to condense, and it would risk losing the exact error message.
+- `MAX_TOOL_HISTORY_ENTRIES = 6`: once `tool_history` grows past this many entries, `_prune_tool_history()` collapses the oldest into one combined `history_summary` entry, keeping the most recent 5 in full detail.
+- Both reuse a single `_summarize_text()` helper and `_SUMMARIZE_SYSTEM_PROMPT`, called through `chat()` like any other LLM step.
+- The **trace still records the full, unsummarized result** (`tracer.add_step(tool_result=result, ...)` uses the raw value) — only what feeds back into future prompts (`tool_history`) shrinks. Pruning is a prompt-management concern, not an observability one.
+- `test_pruning.py`: mocks `chat()` to return a fixed summary when it detects the summarization prompt, and tests the mechanism (threshold, cap, error passthrough) deterministically and fast.
+- Hand-rolled agent only, matching how tools/reflection/episodic memory were each built here first before any LangGraph port.
+
+### Two real failures from the summarization prompt, found by testing on the actual recall_knowledge data used in the stress suite
+
+**First attempt**: a plain "summarize in 2-4 sentences" prompt. Fed the real `recall_knowledge` output for "why did the first approval attempt fail" (2282 chars) and got back a generic paragraph about "the approval system... governance/safety layer... Phase 5 of the roadmap" — technically about the right topic, but it **dropped the literal `await_approval` identifier and the actual answer** (the recursion bug) entirely. Narrative summarization biased the small model toward describing the topic rather than preserving the specific fact needed to answer the question.
+
+**Fix**: reframed the prompt as fact extraction, not summarization — a bullet list where "every bullet must contain a concrete detail," with an explicit rule against generic bullets and a worked example. Re-ran the same input: `await_approval` was preserved, and the actual recursion explanation was in the output.
+
+**Second attempt caught by a direct unit test, not the stress suite**: fed `_prune_tool_history` a fake history of 8 `calculate` calls. The collapsed summary preserved the **inputs** ("calculate function was called with arguments (1 + 1)") but silently **dropped every result value** (2, 4, 6...) — exactly backwards, since the result is usually the fact that matters. The fact-extraction prompt's only example was prose-shaped (the approval bug), and didn't generalize to the very different `name(input) -> result` shape of a tool-call history.
+
+**Fix**: added an explicit rule ("if a line is shaped like `name(input) -> result`, you MUST keep both... never summarize away a `-> result` into just `was called with input X`") plus a second few-shot example in exactly that shape. Re-tested: every result value was preserved.
+
+### Stress test results
+
+Both implementations pass the full 36-case suite (LangGraph doesn't have this feature yet — this just confirms nothing broke):
+
+| Implementation | Pass rate |
+|---|---|
+| Hand-rolled | 36 / 36 (100%) |
+| LangGraph (auto-approve) | 36 / 36 (100%) |
+
+A cost worth naming plainly: summarization is an extra LLM call whenever it triggers, so a run that hits `recall_knowledge` now pays that latency. Max response time was noisier across these runs (17–41s at the high end, vs. 13–18s before) — consistent with an added round-trip on top of already-variable local-model latency, not a new failure mode.
+
+### Key observations
+
+- The exact same prompting lesson from `memory.py`'s chunking work showed up again, in a new shape: a general instruction ("preserve identifiers verbatim") is not enough on its own — the model needs a worked example in the *same shape* as the real input. A prose example didn't transfer to a structured `name(input) -> result` case, even with an otherwise-correct general rule already in place.
+- "Summarize" and "extract facts" are different asks to a small model, and they produce different failure modes: summarization drifts toward describing the topic; fact extraction stays anchored to specifics. When the specifics are the answer, ask for facts, not a summary.
+- Keeping the trace's raw record separate from `tool_history`'s (possibly summarized) record means pruning is free to be lossy for prompt purposes without weakening observability — a clean separation of concerns that existed by accident (they were already two different code paths) but turned out to matter here.
+- A bug in `_prune_tool_history` was caught by a small, targeted unit test before it ever touched the stress suite, because no current question triggers 6+ tool calls — a reminder that passing stress tests prove the paths they exercise, not the paths they don't.
+
+### What this enables next
+
+- Port short-term pruning to `langgraph_agent.py`.
+- All three Phase 6 boxes are now checked. Natural next phase: Phase 7 (Multi-Agent), per the roadmap's own gate ("only move to multi-agent after single-agent is reliable").
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -1106,6 +1156,7 @@ Both implementations pass the full 36-case suite (LangGraph doesn't have episodi
 - [x] Add human-in-the-loop approval before external tools in LangGraph.
 - [x] Add a local semantic memory / RAG store (`recall_knowledge`) over the project's own docs.
 - [x] Add episodic memory (store and recall past runs/corrections).
-- [ ] Port episodic memory to the LangGraph agent.
+- [x] Add short-term memory (summarize/prune long tool histories).
+- [ ] Port episodic memory and short-term pruning to the LangGraph agent.
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
 - [ ] Add LangGraph persistence/checkpointing across process restarts.

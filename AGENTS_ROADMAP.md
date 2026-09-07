@@ -536,7 +536,7 @@ Use this checklist to track mastery.
 - [x] Denial returns a clean, safe message.
 
 ### Phase 6 — Memory & RAG
-- [ ] Short-term history is summarized/pruned.
+- [x] Short-term history is summarized/pruned.
 - [x] Past failures are stored and reused.
 - [x] Agent retrieves from a vector store.
 
