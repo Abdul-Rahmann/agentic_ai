@@ -1005,6 +1005,33 @@ Max response time:    11.75s
 
 ---
 
+### Experiment 15: Actor + Critic Multi-Agent Team (Honest Result: Parity, Not a Win)
+
+**Date**: 2026-09-06
+**Location**: `first_agent/multi_agent.py`, `first_agent/stress_test.py`
+**Goal**: Build a genuine two-agent team and test the roadmap's actual Phase 7 deliverable — does it outperform the single agent?
+
+**What was built**: `multi_agent.py` reuses `plan_node`/`execute_node`/`answer_node` UNCHANGED as the Actor, and adds a new checklist-based `critic_node` (numeric consistency, tool relevance, format match) in place of `reflect_node`'s single VERIFIED/INCORRECT judgment. Added `--multi-agent` to `stress_test.py`.
+
+**A real bug found immediately**: the first critic prompt ("treat with skepticism, not charity" + a 3-item checklist) hallucinated problems with correct answers — it rejected the actually-correct `993600` with a nonsensical claim, and a retry loop made a weather answer *worse* across retries (ended up dropping the temperature). Stress suite dropped to 34/36, below the single-agent baseline. **Fixed** by rewriting the prompt to default to APPROVE and require REVISE to cite one specific, concrete mismatch — back to 36/36.
+
+**Three honest head-to-head comparisons, all showing parity**: fed the same forced-wrong Actor answer to both the old `reflect_node` and new `critic_node` (real LLM judging both) across a tool-relevance mix-up, a format violation, and a retry-recovery test. All three: same verdict, same corrected answer. The new critic's only edge was a more specific explanation of *why*, not a different or better verdict.
+
+**Stress test results**: all three implementations (hand-rolled, single-agent LangGraph, Actor+Critic) pass 36/36. Checked off: "built a team of 2+ agents," "roles clearly separated." Left honestly unchecked: "team beats single agent."
+
+**Key observations**:
+- A more elaborate critic prompt is not automatically a better critic — it introduced a new failure mode without fixing anything the old one couldn't already do.
+- "Treat with skepticism" needs a strong counter-guardrail for a small model, or it manufactures problems to comply with the instruction to be critical.
+- With one shared local model doing both roles, prompt structure alone doesn't create a capability difference — genuine gains would need real capability separation (a different/stronger model for the Critic), not just different wording.
+- The real bug only showed up at the full 36-question suite's scale — the 3 hand-picked adversarial cases all showed parity and would have missed it, echoing Experiment 14's same lesson.
+
+**Next steps for this experiment**:
+- Try genuine capability separation for the Critic (different model/temperature) if pursuing a real "outperforms" result.
+- Port episodic memory and short-term pruning to the multi-agent graph.
+- Phase 8 (Evaluation) is a natural next step — a larger, more adversarial eval harness would likely surface more regressions like this one.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -1048,6 +1075,7 @@ Use this section to track future additions to the notes.
 | 2026-08-29 | Fixed two `memory.py` gaps found by manual testing: chunking is now heading-aware (never spans two sections) for better retrieval, and seeding is fingerprint-based (auto re-seeds on doc changes, not just on an empty collection). Also fixed a brittle stress-test assertion pattern (one exact substring required) that was flagging factually-correct, differently-phrased answers as failures. |
 | 2026-09-03 | Added episodic memory (`episodic_memory.py`, SQLite): the agent now recalls a reflection-flagged mistake from a past run and avoids repeating it in a new one. Fixed a similarity-matching bug (character-level diffing scored a valid paraphrase too low; switched to embedding-based cosine similarity) and a crash bug (relative DB path only worked from the repo root, and the recall call wasn't defensively wrapped) found while testing. Hand-rolled agent only so far; both implementations still pass 36/36. |
 | 2026-09-06 | Added short-term memory management: long tool results get summarized before entering `tool_history`, and `tool_history` itself gets capped with older entries collapsed. Fixed two prompt failures found by testing on real data (narrative summarization dropped the key identifier; the fix didn't generalize to `name(input) -> result`-shaped tool history until a matching example was added). Phase 6 is now fully checked off. Hand-rolled agent only so far; both implementations still pass 36/36. |
+| 2026-09-06 | Built `multi_agent.py`: a genuine Actor+Critic team in LangGraph (Phase 7). Found and fixed a real bug where an over-skeptical critic prompt hallucinated problems with correct answers, dropping the stress suite below baseline (34/36); fixed to 36/36. Honestly tested three head-to-head scenarios against the single-agent baseline and found parity, not a win — documented as a real finding rather than forced as a success. "Team beats single agent" left unchecked in AGENTS_ROADMAP.md. |
 
 ---
 

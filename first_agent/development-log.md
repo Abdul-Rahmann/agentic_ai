@@ -1121,6 +1121,61 @@ A cost worth naming plainly: summarization is an extra LLM call whenever it trig
 
 ---
 
+## Experiment 15: Actor + Critic Multi-Agent Team (Phase 7 — Honest Result: Parity, Not a Win)
+
+**Date**: 2026-09-06
+**Location**: `first_agent/multi_agent.py`, `first_agent/stress_test.py`
+**Goal**: Build a genuine two-agent team (not just "the same agent reviewing itself") and test the roadmap's actual Phase 7 deliverable: does the team outperform the single agent on at least one task?
+
+### What was built
+
+- `multi_agent.py`: an **Actor** (reuses `plan_node`, `execute_node`, `answer_node` UNCHANGED from `langgraph_agent.py` — same tools, same prompts, same human-approval gate) and a **Critic** (`critic_node`, a new, more structured reviewer). The two graphs differ in exactly one node, so any behavior difference is attributable to the Critic, not a confound elsewhere.
+- The Critic's prompt is a checklist (numeric consistency, tool relevance — citing the wrong sub-question's result, format match) rather than the existing `reflect_node`'s single `VERIFIED:`/`INCORRECT:` judgment, and is explicitly framed as a separate persona reviewing someone else's work.
+- Added `--multi-agent` to `stress_test.py`, mirroring `--langgraph`.
+
+### A real bug found immediately: an over-skeptical critic hallucinates problems
+
+The first critic prompt said "treat the Actor's answer with skepticism, not charity" and asked it to check a checklist of 3 items. Running the full stress suite dropped to **34/36** — *below* the single-agent baseline:
+
+- The correct answer `993600` (product of numbers in `data/numbers.txt`) was rejected with a nonsensical claim: "the correct result should be the product of just the first number in the file, which is 12." This isn't even a coherent alternative — flagging it anyway is the checklist-completionist failure mode: asked to find something wrong, the model found something, whether or not it was real.
+- The weather question's retry loop made the answer **worse across retries** — it started with a complete answer and ended with just `"Overcast."`, dropping the temperature entirely, which then failed the test's `°C` assertion.
+
+**Fix**: rewrote the prompt to default to `APPROVE`, require the `REVISE` reason to cite one specific, concrete mismatch (an exact wrong number or an explicitly-stated format instruction that was violated), and explicitly forbid inventing a stricter interpretation of the question than what was literally asked. Re-tested both failing cases directly (hand-constructed state, bypassing the planner) — both now `APPROVE` correctly. Full suite: back to **36/36**.
+
+### Three honest head-to-head comparisons — none showed a real difference
+
+To test the actual "outperforms" claim, three scenarios were tried, feeding the exact same forced-wrong Actor answer to both the old `reflect_node` and the new `critic_node` (only the Actor's answer was mocked; both judges made a real LLM call):
+
+1. **Tool-relevance mix-up** (citing `108 / 4`'s result for a `9 * 6` question): both judges caught it. The old one's explanation was vaguer ("the tool history shows 9 * 6 equals 54"); the new one correctly diagnosed *which* sub-question's result was wrongly cited — a real explanation-quality difference, not a verdict difference.
+2. **Format violation** (a verbose answer when "just the number" was requested): both judges caught it — the old prompt's general "is this correct and well-supported" framing turned out to implicitly notice the format mismatch too, without an explicit checklist item for it.
+3. **Retry recovery quality**: fed each judge's feedback text back into a real retry (`_build_answer_messages`). Both produced the identical corrected answer (`"54\n27"`).
+
+### Stress test results
+
+| Implementation | Pass rate |
+|---|---|
+| Hand-rolled | 36 / 36 (100%) |
+| LangGraph (single-agent) | 36 / 36 (100%) |
+| Actor+Critic multi-agent | 36 / 36 (100%), after the prompt fix |
+
+**Parity, not a demonstrated win.** Checked off in `AGENTS_ROADMAP.md`: "built a team of 2+ agents" and "roles are clearly separated." Left unchecked, honestly: "team beats single agent on at least one task."
+
+### Key observations
+
+- **A more elaborate, structured critic prompt is not automatically a better critic.** The first version actively made things worse — it introduced a new failure mode (hallucinated rejections of correct answers) without fixing anything, because the existing lightweight `reflect_node` prompt already had access to the same information (question + tool history + proposed answer) and was already reasonably capable.
+- **"Treat with skepticism" is a dangerous instruction for a small local model without a strong counter-guardrail.** Asked to be skeptical and given a checklist to complete, the model found things to flag whether or not they were real. The fix that worked was an explicit default-to-approve instruction plus "cite one specific, concrete mismatch" — shifting the burden of proof onto the REVISE path rather than treating skepticism as the default stance.
+- **A retry loop can make an answer worse, not better**, if the thing triggering the retry (a false or vague critique) doesn't point the Actor toward an actual fix. The weather case's temperature-dropping regression is a direct example — retrying isn't free, and retrying on bad feedback can actively degrade quality.
+- **With one shared local model doing both roles, prompt structure alone doesn't create a capability difference.** The three head-to-head tests all showed parity in verdict quality; the real, measurable difference was explanation specificity, not correctness. This suggests genuine multi-agent capability gains (if achievable at all with a single small local model) would need actual capability separation — a different or stronger model for the Critic — not just a different prompt for the same model.
+- **Running the full 36-question stress suite was what caught the real bug** — the three hand-picked adversarial scenarios all showed parity and would have suggested "no problems here." The regression only showed up at broader, more representative scale, echoing the same lesson from `_prune_tool_history`'s bug in Experiment 14: passing tests only prove the paths they exercise.
+
+### What this enables next
+
+- Try genuine capability separation for the Critic (different model, different temperature) rather than just a different prompt on the same model, if pursuing a real "outperforms" result.
+- Port episodic memory and short-term pruning to the multi-agent graph too, now that it exists as a third implementation alongside the hand-rolled and single-agent LangGraph versions.
+- Phase 8 (Evaluation) is a natural next step regardless: the 36-question stress suite already caught a real regression here that 3 hand-picked cases missed — a more rigorous, larger, adversarial eval harness would likely surface more of these.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -1158,5 +1213,7 @@ A cost worth naming plainly: summarization is an extra LLM call whenever it trig
 - [x] Add episodic memory (store and recall past runs/corrections).
 - [x] Add short-term memory (summarize/prune long tool histories).
 - [ ] Port episodic memory and short-term pruning to the LangGraph agent.
+- [x] Build a multi-agent team (Actor + Critic) in LangGraph.
+- [ ] Get the multi-agent team to genuinely outperform the single agent on at least one task (currently at parity; needs real capability separation, not just a different prompt on the same model).
 - [ ] Expand the benchmark script with more edge cases and adversarial prompts.
 - [ ] Add LangGraph persistence/checkpointing across process restarts.

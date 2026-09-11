@@ -54,6 +54,7 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 - `test_retry.py` — unit-style test that exercises the reflection retry loop with a mocked LLM
 - `test_episodic_memory.py` — unit-style test proving a mistake recorded in one `run_agent()` call is recalled and corrected in a separate, later call
 - `test_pruning.py` — unit-style test of short-term memory management: summarization threshold, tool-history cap, error passthrough
+- `multi_agent.py` — a third implementation: an Actor + Critic two-agent team in LangGraph (Phase 7)
 - `trace_analyzer.py` — report generator that reads trace JSON files and summarizes latency, tool usage, guards, and failures
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
@@ -111,7 +112,7 @@ python first_agent/stress_test.py --langgraph --auto-approve
 python first_agent/langgraph_agent.py
 ```
 
-Both implementations currently pass **36 / 36** cases with comparable latency.
+Both implementations currently pass **36 / 36** cases with comparable latency. (A third implementation, the Actor+Critic multi-agent team, also passes 36/36 — see the Multi-agent section below.)
 
 ## Analyze traces
 
@@ -318,6 +319,38 @@ python first_agent/stress_test.py --langgraph --auto-approve
 
 Auto-approve bypasses the interrupt and lets external tools run without prompting. It is useful for headless/CI runs, but it removes the safety gate.
 
+## Multi-agent: Actor + Critic (`multi_agent.py`)
+
+A third implementation, alongside the hand-rolled and single-agent LangGraph versions: a genuine two-agent team instead of one agent reviewing its own answer.
+
+- **Actor**: `plan_node`, `execute_node`, `answer_node` reused **unchanged** from `langgraph_agent.py` — same tools, same prompts, same human-approval gate. Nothing about how it plans or answers changes.
+- **Critic**: a new `critic_node` with its own distinct persona and a structured checklist (numeric consistency, tool relevance — is this citing the correct sub-question's result, not a different one that also appears in history — and format match), in place of the single-agent version's lightweight `VERIFIED:`/`INCORRECT:` judgment.
+
+**Honest result** (see `development-log.md`, Experiment 15, for the full story): both agents pass the full 36-question stress suite at **parity** with the single-agent version — this does not yet demonstrate the team *outperforming* the single agent, which is what the roadmap's Phase 7 deliverable actually asks for. A more elaborate critic prompt initially made things *worse* (34/36) by hallucinating problems with correct answers, before being fixed to default to approval unless it can cite one concrete mismatch. With one shared local model doing both roles, the critic's edge was more specific explanations of *why* something is wrong, not a different or better verdict — real capability separation (a different/stronger model for the Critic) is the more promising path to an actual win, not yet tried.
+
+### Try it yourself
+
+```bash
+python first_agent/multi_agent.py                          # interactive
+python first_agent/stress_test.py --multi-agent --auto-approve   # full benchmark
+```
+
+To see the false-positive bug (and its fix) directly, construct a state where the Actor's answer cites the wrong sub-result and check both judges' verdicts:
+
+```bash
+python3 -c "
+import langgraph_agent, multi_agent
+state = {
+    'question': 'What is 9 * 6, and separately what is 108 / 4?',
+    'tool_history': [('calculate', '9 * 6', '54'), ('calculate', '108 / 4', '27')],
+    'final_answer': 'For 9 * 6 the answer is 27.',
+    'reflection_feedback': [], 'attempts': 0, 'max_retries': 0, 'trace_events': [], 'reflect': True,
+}
+print('OLD reflect_node:', langgraph_agent.reflect_node(dict(state)))
+print('NEW critic_node: ', multi_agent.critic_node(dict(state)))
+"
+```
+
 ## Memory management (hand-rolled agent only)
 
 Beyond `recall_knowledge` (a tool the agent chooses to call), `math_agent.py`'s `run_agent()` manages two other kinds of memory automatically, with no tool call involved:
@@ -421,6 +454,9 @@ Traces are disabled during stress testing to keep the benchmark clean.
 19. New code paths should be wrapped as defensively as the code around them by default. An episodic-memory call added outside `run_agent`'s existing `try/except` turned one path bug into a 100% failure rate across the whole stress suite instead of a graceful "no hint this time."
 20. A general prompt rule ("preserve exact identifiers") needs a worked example in the *same shape* as the real input to reliably transfer. A prose-shaped example didn't stop the model from dropping every result value when summarizing a `name(input) -> result`-shaped tool history — it took a second example in that exact shape to fix.
 21. "Summarize" and "extract facts" are different asks to a small model with different failure modes: summarization drifts toward describing the topic, fact extraction stays anchored to specifics. Ask for facts when the specifics are the answer.
+22. A more elaborate, more skeptical critic prompt is not automatically a better critic. Given a checklist and told to be skeptical, a small model can find something to flag whether or not it's real — the fix was defaulting to approval and requiring one specific, concrete mismatch to override it, not asking it to be *more* thorough.
+23. With one shared local model playing two roles, a differently-worded prompt for the "critic" role doesn't reliably create a different or better verdict than the original — only a more detailed explanation. Real multi-agent capability gains likely need actual capability separation (a different or stronger model), not just a different persona on the same model.
+24. Running the full stress suite — not just a few hand-picked adversarial cases — is what caught a real regression (Experiment 15's critic bug). Three targeted test cases all showed parity and would have missed it entirely.
 
 ## Next steps
 
@@ -434,8 +470,9 @@ Traces are disabled during stress testing to keep the benchmark clean.
 8. ~~Add episodic memory: store past runs/corrections and let the agent recall past failures for a similar question.~~ Done: `episodic_memory.py` (SQLite), wired into `math_agent.py`'s `run_agent()`.
 9. ~~Add short-term memory: summarize/prune long tool histories.~~ Done — Phase 6 is now fully checked off.
 10. Port episodic memory and short-term pruning to `langgraph_agent.py`.
-11. Move to Phase 7 (Multi-Agent): a role-separated team (e.g. planner + executor, or critic + actor) instead of one agent doing everything.
-12. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
-13. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
-14. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
-15. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.
+11. ~~Move to Phase 7 (Multi-Agent): build a role-separated team.~~ Done: `multi_agent.py` (Actor + Critic). Currently at parity with the single agent, not yet outperforming it — see the Multi-agent section above.
+12. Get the multi-agent team to genuinely outperform the single agent — likely needs real capability separation (a different/stronger model for the Critic), not just a different prompt on the same model.
+13. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
+14. Experiment with reflection prompting the agent to choose a *different* tool on retry, not just re-synthesize.
+15. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
+16. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.

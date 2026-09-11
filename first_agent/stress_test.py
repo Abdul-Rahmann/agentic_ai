@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, "first_agent")
 from math_agent import run_agent as hand_rolled_run_agent
 from langgraph_agent import run_agent as langgraph_run_agent
+from multi_agent import run_agent as multi_agent_run_agent
 import episodic_memory
 
 # Isolate episodic memory into its own throwaway DB during benchmark runs,
@@ -374,6 +375,12 @@ if __name__ == "__main__":
         help="Run the stress test against the LangGraph implementation instead of the hand-rolled one",
     )
     parser.add_argument(
+        "--multi-agent",
+        dest="multi_agent",
+        action="store_true",
+        help="Run the stress test against the Actor+Critic multi-agent LangGraph team",
+    )
+    parser.add_argument(
         "--auto-approve",
         dest="auto_approve",
         action="store_true",
@@ -381,6 +388,16 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    if args.multi_agent:
+        if not args.auto_approve:
+            print("Warning: Multi-agent team will pause for approval on external tools.")
+            print("Use --auto-approve for non-interactive stress testing.")
+        raise SystemExit(
+            main(
+                run_agent=lambda *a, **kw: multi_agent_run_agent(*a, **kw, auto_approve=args.auto_approve),
+                agent_label="Actor+Critic Multi-Agent",
+            )
+        )
     if args.langgraph:
         if not args.auto_approve:
             print("Warning: LangGraph agent will pause for approval on external tools.")

@@ -541,9 +541,9 @@ Use this checklist to track mastery.
 - [x] Agent retrieves from a vector store.
 
 ### Phase 7 — Multi-Agent
-- [ ] Built a team of 2+ agents.
-- [ ] Roles are clearly separated.
-- [ ] Team beats single agent on at least one task.
+- [x] Built a team of 2+ agents.
+- [x] Roles are clearly separated.
+- [ ] Team beats single agent on at least one task. (Tested honestly: currently at parity, 36/36 both. See development-log.md Experiment 15 for what was tried and why it didn't show a win with one shared local model.)
 
 ### Phase 8 — Evaluation
 - [ ] Automated pass/fail reporting.
