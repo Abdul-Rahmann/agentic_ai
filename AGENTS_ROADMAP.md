@@ -546,9 +546,9 @@ Use this checklist to track mastery.
 - [ ] Team beats single agent on at least one task. (Tested honestly: currently at parity, 36/36 both. See development-log.md Experiment 15 for what was tried and why it didn't show a win with one shared local model.)
 
 ### Phase 8 — Evaluation
-- [ ] Automated pass/fail reporting.
-- [ ] Adversarial / edge cases added.
-- [ ] Compared at least two models or providers.
+- [x] Automated pass/fail reporting. (Already true since early phases — `stress_test.py`.)
+- [x] Adversarial / edge cases added. (Path traversal, division by zero, large factorial — all pass. A prompt-injection probe is included but deliberately unscored: found genuinely unreliable after mitigation, tracked honestly rather than falsely certified fixed. See development-log.md Experiment 16.)
+- [x] Compared at least two models or providers. (`llama3.1` vs `gpt-4o-mini` on the identical 39-question suite — `gpt-4o-mini` ~2x faster, 38/39 vs 39/39, with two nuanced findings that don't reduce to "which one wins." See development-log.md Experiment 17.)
 
 ### Phase 9 — Production
 - [ ] Agent exposed via API or CLI.
