@@ -99,7 +99,7 @@ Try questions like:
 python first_agent/stress_test.py
 ```
 
-The current suite covers 39 scored cases (plus one unscored, informational prompt-injection probe — see Adversarial testing below) and passes all 39 with `llama3.1:latest`.
+The current suite covers 39 scored cases (plus one unscored, informational prompt-injection probe — see Adversarial testing below) and typically passes all 39 with `llama3.1:latest`, with occasional honest flakiness from `web_search`'s live results or rare tool-choice misfires — see the note below the model-comparison table.
 
 ### Run the LangGraph version
 
@@ -113,7 +113,7 @@ python first_agent/stress_test.py --langgraph --auto-approve
 python first_agent/langgraph_agent.py
 ```
 
-Both implementations currently pass **39 / 39** cases with comparable latency. (A third implementation, the Actor+Critic multi-agent team, also passes 39/39 — see the Multi-agent section below.)
+All three implementations (hand-rolled, LangGraph, and the Actor+Critic multi-agent team — see below) typically pass **37-39 / 39** cases with comparable latency. The occasional shortfall is confirmed, honest flakiness, not a hidden bug: `web_search`'s live DuckDuckGo/Wikipedia results vary run to run, and small local models can occasionally misfire into an unnecessary tool call even on simple no-tool-needed questions (~1/3 on direct repetition for one such question). Check `[FAIL]` details rather than trusting the summary number alone if you see less than 39/39.
 
 ## Analyze traces
 
@@ -370,13 +370,13 @@ print('NEW critic_node: ', multi_agent.critic_node(dict(state)))
 "
 ```
 
-## Memory management (hand-rolled agent only)
+## Memory management (all three implementations)
 
-Beyond `recall_knowledge` (a tool the agent chooses to call), `math_agent.py`'s `run_agent()` manages two other kinds of memory automatically, with no tool call involved:
+Beyond `recall_knowledge` (a tool the agent chooses to call), every `run_agent()` — hand-rolled, LangGraph, and the multi-agent team — manages two other kinds of memory automatically, with no tool call involved. The mechanisms live in `math_agent.py` and `episodic_memory.py`; `langgraph_agent.py` and `multi_agent.py` wire the same logic into their own `run_agent()`/nodes (`multi_agent.py` gets pruning for free since it reuses `execute_node` unchanged).
 
-**Episodic memory** (`episodic_memory.py`): before the first attempt, `recall_similar_episode(question)` checks a local SQLite store (`episodes.db`) for a past run on a similar question. If that past run was flagged incorrect by reflection, its explanation is seeded into `reflection_feedback` — the same list the in-run retry loop already uses — so the agent starts already warned about a mistake it made in a *previous, separate* run. After each run where reflection reaches a verdict, the outcome is recorded for next time. Matching is by embedding similarity (reusing `memory.py`'s model), not exact string matching, so a paraphrased repeat of a failed question still gets recognized.
+**Episodic memory** (`episodic_memory.py`): before the first attempt, `recall_similar_episode(question)` checks a local SQLite store (`episodes.db`) for a past run on a similar question. If that past run was flagged incorrect by reflection/the critic, its explanation is seeded into `reflection_feedback` — the same list the in-run retry loop already uses — so the agent starts already warned about a mistake it made in a *previous, separate* run. After each run where a verdict is reached, the outcome is recorded for next time. Matching is by embedding similarity (reusing `memory.py`'s model), not exact string matching, so a paraphrased repeat of a failed question still gets recognized.
 
-**Short-term memory** (in `math_agent.py`): any single tool result over `MAX_TOOL_RESULT_CHARS` (1000) gets summarized via an LLM call before being stored in `tool_history` — the trace still keeps the full raw result, only what feeds back into future prompts shrinks. If `tool_history` itself grows past `MAX_TOOL_HISTORY_ENTRIES` (6) entries, the oldest are collapsed into one combined summary, keeping the 5 most recent in full detail.
+**Short-term memory** (in `math_agent.py`, used by all three): any single tool result over `MAX_TOOL_RESULT_CHARS` (1000) gets summarized via an LLM call before being stored in `tool_history` — the trace still keeps the full raw result, only what feeds back into future prompts shrinks. If `tool_history` itself grows past `MAX_TOOL_HISTORY_ENTRIES` (6) entries, the oldest are collapsed into one combined summary, keeping the 5 most recent in full detail.
 
 Both are wrapped defensively — a failure in either degrades to "no hint" / "no summarization," never crashes the run.
 
@@ -450,6 +450,29 @@ Example trace file (`first_agent/traces/2026-...__c7e21dac.json`):
 
 Traces are disabled during stress testing to keep the benchmark clean.
 
+## Cost & token tracking
+
+Every trace also records `prompt_tokens`, `completion_tokens`, and `estimated_cost_usd`. Ollama (`llama3.1`, local) always reports `estimated_cost_usd: null` — genuinely unpriced, not a fake `$0` — since there's no meaningful price for a local model. OpenAI models get a real estimate from a small hand-maintained pricing table in `tracer.py` (`MODEL_PRICING_PER_1M`) — verify against OpenAI's current pricing page before trusting it for anything beyond a rough estimate; it does not auto-update.
+
+`trace_analyzer.py` reports a TOKENS & COST section broken down per model. Traces written before this feature existed correctly show "no token data" rather than a misleading `$0`.
+
+### Try it yourself
+
+```bash
+python first_agent/trace_analyzer.py --last 20   # see the TOKENS & COST breakdown
+
+# Compare a free local run against a real cost:
+python3 -c "
+from math_agent import run_agent
+run_agent('What is 2 + 2?', trace=True)
+"
+USE_OPENAI=1 AGENT_MODEL=gpt-4o-mini python3 -c "
+from math_agent import run_agent
+run_agent('What is 2 + 2?', trace=True)
+"
+python first_agent/trace_analyzer.py --last 2
+```
+
 ## Lessons learned
 
 1. Small local models need very explicit prompts and few-shot examples to handle multi-turn tool loops.
@@ -480,6 +503,10 @@ Traces are disabled during stress testing to keep the benchmark clean.
 26. A prompt-injection mitigation can introduce a worse regression than the vulnerability it targets — wrapping tool results in delimiter tokens to mark them "untrusted" broke the model's ability to read its own tool results correctly on an unrelated math question, 5/5 times, until the delimiters were dropped.
 27. Small local models can be extremely sensitive to grammatically-irrelevant wording changes: "it contains" vs. "they contain" — otherwise identical meaning — flipped one question from 8/8 correct to 8/8 wrong.
 28. Not every real problem gets a clean fix in one sitting. Marking a test "informational, not scored" when its outcome is genuinely unreliable is the honest choice — a flaky assertion in a pass/fail suite misreports a known limitation as a new regression, or vice versa.
+29. Porting a feature across multiple implementations of the same agent needs the same testing discipline as building it the first time — run the full suite, don't assume a port "obviously works" because the source implementation already passed.
+30. A checklist fix for one failure mode (a critic being too skeptical) can create a blind spot for a different failure mode (not skeptical enough) — each needs its own narrow rule and its own worked example, not a general strictness dial in either direction.
+31. Different LLM provider clients expose token usage differently (Ollama: `prompt_eval_count`/`eval_count`; raw OpenAI: `usage.prompt_tokens`/`.completion_tokens`; LangChain's wrapper: a normalized `usage_metadata` dict) — worth checking each empirically before writing tracking code, rather than assuming one shape fits all.
+32. Reporting `None`/"no data" instead of a fake `$0` or "0%" matters for correctness whenever a metric can be genuinely unavailable, not just zero — otherwise a mix of measured and unmeasured data silently under-reports.
 
 ## Next steps
 
@@ -492,7 +519,7 @@ Traces are disabled during stress testing to keep the benchmark clean.
 7. ~~Give the agent a local semantic memory store (RAG over its own docs).~~ Done: `recall_knowledge(query)` via `memory.py` (Chroma + sentence-transformers).
 8. ~~Add episodic memory: store past runs/corrections and let the agent recall past failures for a similar question.~~ Done: `episodic_memory.py` (SQLite), wired into `math_agent.py`'s `run_agent()`.
 9. ~~Add short-term memory: summarize/prune long tool histories.~~ Done — Phase 6 is now fully checked off.
-10. Port episodic memory and short-term pruning to `langgraph_agent.py`.
+10. ~~Port episodic memory and short-term pruning to `langgraph_agent.py`.~~ Done — also ported to `multi_agent.py`; found and fixed a real multi-agent Critic gap along the way (approved a vague-but-true answer when a specific one was available).
 11. ~~Move to Phase 7 (Multi-Agent): build a role-separated team.~~ Done: `multi_agent.py` (Actor + Critic). Currently at parity with the single agent, not yet outperforming it — see the Multi-agent section above.
 12. Get the multi-agent team to genuinely outperform the single agent — likely needs real capability separation (a different/stronger model for the Critic), not just a different prompt on the same model.
 13. Evaluate the agent on longer, more ambiguous multi-step tasks (e.g., search + calculate combinations).
@@ -501,4 +528,5 @@ Traces are disabled during stress testing to keep the benchmark clean.
 16. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.
 17. ~~Add adversarial/edge-case questions (Phase 8).~~ Done: path traversal, division by zero, and a large factorial pass; a prompt-injection probe is tracked as informational, not scored — it's genuinely unreliable, not yet solved.
 18. Find a real fix for the prompt-injection gap — likely needs more than prompt engineering (a classifier pass on tool output, or structural message-role isolation), not just more wording iteration.
-19. Compare at least two models/providers (`OPENAI_API_KEY` is available in this environment) — the last open Phase 8 checklist item.
+19. ~~Compare at least two models/providers.~~ Done: `llama3.1` vs `gpt-4o-mini` on the identical suite — see `development-log.md` Experiment 17. Phase 8 fully checked off.
+20. ~~Add cost/token tracking.~~ Done: `tracer.py` + `trace_analyzer.py`, verified against both providers — see the Cost & token tracking section above.

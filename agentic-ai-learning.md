@@ -1118,6 +1118,46 @@ Max response time:    11.75s
 
 ---
 
+### Experiment 18: Solidifying — Port Episodic Memory + Pruning, Fix a Critic Gap
+
+**Date**: 2026-09-14
+**Location**: `first_agent/langgraph_agent.py`, `first_agent/multi_agent.py`
+**Goal**: Close a real feature-parity gap before Phase 9 — episodic memory and pruning existed only in the hand-rolled agent.
+
+**What was built**: added `verified` to `AgentState`; `run_agent()` in both LangGraph and multi-agent now recalls/records episodes the same way the hand-rolled version does. `execute_node` (imported unchanged into `multi_agent.py`) now prunes tool history — the multi-agent version inherited this for free.
+
+**A real gap found by testing**: the multi-agent Critic approved a vague-but-true answer ("native interrupts are the right primitive...") to a "why did X fail" question, when the tool history contained the specific mechanism verbatim. None of Experiment 15's 3 checklist items cover "does this address a specific why/what/how question." Fixed with a narrowly-scoped 4th checklist item (with an explicit "only flag when clearly available" qualifier, to avoid reintroducing Experiment 15's over-skepticism problem) — verified the real case now gets `REVISE`d, and both of Experiment 15's original false-positive tests still `APPROVE`.
+
+**Two pre-existing flakiness sources confirmed, not new**: `web_search`'s live results vary run to run; even simple no-tool-needed questions can occasionally misfire into an unnecessary tool call (1/3 on direct repetition) — both existed before today's changes.
+
+**Key observations**:
+- Porting a feature across implementations needs the same discipline as building it — run the full suite, don't assume it "obviously works."
+- A checklist fix for one failure mode (too skeptical) can blind-spot a different one (not skeptical enough) — each needs its own rule and example, not a general strictness dial.
+- Reusing `execute_node` unchanged paid off again — pruning needed one code change, not two.
+
+---
+
+### Experiment 19: Cost & Token Tracking
+
+**Date**: 2026-09-14
+**Location**: `first_agent/tracer.py` and all three `run_agent()` implementations, `first_agent/trace_analyzer.py`
+**Goal**: Close the gap flagged since Experiment 9 — traces never recorded token usage or cost.
+
+**What was built**: a small accumulator in `tracer.py` (reset at the start of `run_agent()`, read at the end — additive, no existing `tracer.add_step()` call site needed to change) plus a hand-maintained pricing table. Checked each provider's actual response object empirically before writing code: Ollama exposes `prompt_eval_count`/`eval_count`, raw OpenAI exposes `usage.prompt_tokens`/`.completion_tokens`, and LangChain's wrapper (used in `langgraph_agent.py`, inherited by `multi_agent.py`) normalizes both into `usage_metadata['input_tokens']`/`['output_tokens']` — one code path instead of two. `trace_analyzer.py` gained a per-model TOKENS & COST section.
+
+**Verified**: Ollama reports `None` for cost (genuinely unpriced, not a fake `$0`); OpenAI's cost math hand-verified exactly (`2568 * 0.15/1e6 + 22 * 0.60/1e6 = $0.0003984`, matched). Full regression suite re-run — same two known-flaky failures as Experiment 18, nothing new broken.
+
+**Key observations**:
+- An accumulator reset-at-start/read-at-end pattern adds a cross-cutting measurement without touching every existing call site's established shape.
+- Checking each provider's actual response shape empirically (not assuming consistency) mattered — three different field names across three interfaces.
+- `None` vs `$0` for cost matters — a mix of local and hosted runs would silently under-report if missing price meant "free."
+
+**Next steps for this experiment**:
+- Real per-question cost data now exists for any future model comparison.
+- Last remaining Path B item: a genuine fix (or honest characterization of the limits) for Experiment 16's prompt-injection gap.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -1164,6 +1204,7 @@ Use this section to track future additions to the notes.
 | 2026-09-06 | Built `multi_agent.py`: a genuine Actor+Critic team in LangGraph (Phase 7). Found and fixed a real bug where an over-skeptical critic prompt hallucinated problems with correct answers, dropping the stress suite below baseline (34/36); fixed to 36/36. Honestly tested three head-to-head scenarios against the single-agent baseline and found parity, not a win — documented as a real finding rather than forced as a success. "Team beats single agent" left unchecked in AGENTS_ROADMAP.md. |
 | 2026-09-12 | Added adversarial/edge-case testing (Phase 8): path traversal, division by zero, and a large factorial all held up correctly. A prompt-injection attempt via a file's contents succeeded (agent answered "HACKED"); a delimiter-based mitigation attempt introduced a worse regression (broke `pow(2,8)`, fixed); a follow-up wording change alone flipped 8/8 correct to 8/8 wrong on the same question. Injection resistance remains genuinely unreliable after the fix — added as an informational, unscored probe in `stress_test.py` rather than a false pass/fail. |
 | 2026-09-14 | Documented the evaluation-axes breakdown (correctness/robustness/reliability/latency/cost/comparative) as a proper reference section. Ran the model/provider comparison (last open Phase 8 item): `gpt-4o-mini` vs. local `llama3.1` on the identical 39-question suite — `gpt-4o-mini` ~2x faster but gave a less specific answer on one memory question, and its "resisted" injection probe result turned out to still deliver "HACKED" as the answer (only its reflection step correctly caught the mismatch). Phase 8 fully checked off. |
+| 2026-09-14 | Solidified feature parity (Path B): ported episodic memory + short-term pruning to `langgraph_agent.py` and `multi_agent.py`; found and fixed a real multi-agent Critic gap (approved a vague-but-true answer when a specific one was available) with a narrowly-scoped checklist addition. Added cost/token tracking to `tracer.py` and `trace_analyzer.py`, closing a gap open since Experiment 9 — verified against both Ollama and OpenAI, cost math hand-checked exact. |
 
 ---
 

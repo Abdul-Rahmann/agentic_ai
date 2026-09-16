@@ -14,16 +14,20 @@ import sys
 
 # Reuse the tools and prompts from the hand-rolled agent.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from episodic_memory import format_episode_feedback, recall_similar_episode, record_episode
 from math_agent import (
     TOOLS,
     _build_plan_messages,
     _build_answer_messages,
     _build_reflection_messages,
     _clean_answer,
+    _maybe_sanitize_tool_result,
+    _maybe_summarize_tool_result,
     _parse_reflection,
+    _prune_tool_history,
     extract_json,
 )
-from tracer import Trace, NullTrace, current_ms
+from tracer import Trace, NullTrace, current_ms, get_token_usage, record_token_usage, reset_token_usage
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
@@ -71,6 +75,7 @@ class AgentState(TypedDict):
     auto_approve: bool
     reflect: bool
     trace_events: list[dict]
+    verified: bool | None  # None = reflection never reached a final verdict this run
 
 
 # -----------------------------------------------------------------------------
@@ -94,6 +99,9 @@ def _chat(messages: list, temperature: float = 0.0) -> str:
             lc_messages.append(HumanMessage(content=content))
 
     response = _LLM.invoke(lc_messages)
+    usage = getattr(response, "usage_metadata", None)
+    if usage:
+        record_token_usage(usage.get("input_tokens", 0) or 0, usage.get("output_tokens", 0) or 0)
     return response.content.strip()
 
 
@@ -282,8 +290,17 @@ def execute_node(state: AgentState) -> dict:
             "approved_tools": approved_tools,
         }
 
+    # Sanitize externally-sourced results (strip embedded instructions)
+    # before anything else touches them, then apply short-term memory:
+    # summarize a large result before it feeds back into future prompts
+    # (the trace above already kept the full raw result), then collapse
+    # the oldest entries once history grows past the cap.
+    sanitized_result = _maybe_sanitize_tool_result(tool_name, tool_input, result)
+    stored_result = _maybe_summarize_tool_result(tool_name, tool_input, sanitized_result)
+    new_history = _prune_tool_history(tool_history + [(tool_name, tool_input, stored_result)])
+
     return {
-        "tool_history": tool_history + [(tool_name, tool_input, result)],
+        "tool_history": new_history,
         "pending_tool": None,
         "approved_tools": approved_tools,
     }
@@ -347,7 +364,7 @@ def reflect_node(state: AgentState) -> dict:
     )
 
     if verified:
-        return {"done": True}
+        return {"done": True, "verified": True}
 
     # Reflection flagged the answer. Add feedback and retry if possible.
     new_feedback = reflection_feedback + [reflection_text]
@@ -360,7 +377,7 @@ def reflect_node(state: AgentState) -> dict:
 
     # No more retries. Return the answer with a warning.
     final = f"[Unverified after {max_retries} retries: {reflection_text}] {final_answer}"
-    return {"final_answer": final, "done": True}
+    return {"final_answer": final, "done": True, "verified": False}
 
 
 # -----------------------------------------------------------------------------
@@ -439,12 +456,31 @@ def run_agent(
     """
     provider = "OpenAI" if USE_OPENAI else "Ollama"
     tracer = Trace(question, MODEL, provider) if trace else NullTrace()
+    reset_token_usage()
 
     run_start = current_ms()
+    initial_reflection_feedback = []
+
+    # Episodic memory: if a similar question was answered incorrectly in a
+    # past run, surface that as feedback before the first attempt even
+    # starts — reusing the same reflection_feedback channel plan_node
+    # already reads. Wrapped defensively: a memory-layer failure should
+    # degrade to "no episodic hint," not crash the run.
+    try:
+        past_episode = recall_similar_episode(question)
+        if past_episode:
+            episode_note = format_episode_feedback(past_episode)
+            initial_reflection_feedback.append(episode_note)
+            if verbose:
+                print(f"[Episodic Memory] {episode_note}")
+    except Exception as e:
+        if verbose:
+            print(f"[Episodic Memory] recall failed, continuing without it: {e}")
+
     initial_state = {
         "question": question,
         "tool_history": [],
-        "reflection_feedback": [],
+        "reflection_feedback": initial_reflection_feedback,
         "final_answer": None,
         "error": None,
         "attempts": 0,
@@ -456,6 +492,7 @@ def run_agent(
         "auto_approve": auto_approve,
         "reflect": reflect,
         "trace_events": [],
+        "verified": None,
     }
 
     graph = build_graph()
@@ -498,13 +535,31 @@ def run_agent(
 
     final_answer = final_state.get("final_answer") or "No answer produced."
 
+    # Record this run for episodic recall, but only when reflection actually
+    # reached a verdict (skips tool-error exits and reflect=False runs).
+    # Wrapped defensively so a memory-layer failure can't lose an
+    # otherwise-good answer the user is about to receive.
+    final_verified = final_state.get("verified")
+    if final_verified is not None:
+        try:
+            record_episode(
+                question,
+                final_answer,
+                verified=final_verified,
+                reflection_feedback=None if final_verified else (final_state.get("reflection_feedback") or [None])[-1],
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[Episodic Memory] record failed, continuing: {e}")
+
     # Replay the collected trace events into the tracer.
     trace_events = final_state.get("trace_events", [])
     for event in trace_events:
         tracer.add_step(**event)
 
     total_duration = current_ms() - run_start
-    tracer.finalize(final_answer, total_duration, tracer.error)
+    usage = get_token_usage()
+    tracer.finalize(final_answer, total_duration, tracer.error, usage["prompt_tokens"], usage["completion_tokens"])
     trace_path = tracer.write()
 
     if trace_path and verbose:

@@ -14,6 +14,50 @@ from datetime import datetime, timezone
 
 TRACES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "traces")
 
+# Approximate pricing in USD per 1M tokens, (input, output). Hand-maintained
+# for the models this project actually uses — verify against the provider's
+# current pricing page before trusting this for anything beyond a rough
+# estimate; prices drift and this table does not auto-update.
+MODEL_PRICING_PER_1M = {
+    "gpt-4o-mini": (0.15, 0.60),
+}
+
+
+def estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """Estimate USD cost from token counts. Returns None for unpriced models
+    (e.g. a local Ollama model, which is free) rather than guessing."""
+    for name, (input_price, output_price) in MODEL_PRICING_PER_1M.items():
+        if name in model:
+            return (prompt_tokens * input_price + completion_tokens * output_price) / 1_000_000
+    return None
+
+
+# -----------------------------------------------------------------------------
+# Token usage accumulator
+# -----------------------------------------------------------------------------
+#
+# The chat() / _chat() helpers in each agent implementation record usage
+# here after every LLM call; run_agent() resets this at the start of a run
+# and reads the total at the end. A module-level accumulator (rather than
+# threading token counts through every existing tracer.add_step() call)
+# keeps this additive: no existing call site needs to change shape.
+
+_token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def reset_token_usage() -> None:
+    global _token_usage
+    _token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def record_token_usage(prompt_tokens: int, completion_tokens: int) -> None:
+    _token_usage["prompt_tokens"] += prompt_tokens
+    _token_usage["completion_tokens"] += completion_tokens
+
+
+def get_token_usage() -> dict:
+    return dict(_token_usage)
+
 
 class Trace:
     """Records the execution history of a single agent run."""
@@ -28,6 +72,9 @@ class Trace:
         self.final_answer = None
         self.total_duration_ms = 0
         self.error = None
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.estimated_cost_usd = None
 
     def add_step(
         self,
@@ -62,10 +109,15 @@ class Trace:
         final_answer: str | None,
         total_duration_ms: int,
         error: str | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ):
         self.final_answer = final_answer
         self.total_duration_ms = total_duration_ms
         self.error = error
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.estimated_cost_usd = estimate_cost_usd(self.model, prompt_tokens, completion_tokens)
 
     def to_dict(self) -> dict:
         return {
@@ -78,6 +130,9 @@ class Trace:
             "final_answer": self.final_answer,
             "total_duration_ms": self.total_duration_ms,
             "error": self.error,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "estimated_cost_usd": self.estimated_cost_usd,
         }
 
     def write(self, directory: str = TRACES_DIR) -> str:

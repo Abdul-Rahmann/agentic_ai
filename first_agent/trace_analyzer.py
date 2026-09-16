@@ -4,6 +4,8 @@ Trace analyzer for the multi-tool agent.
 Reads JSON trace files produced by tracer.py and reports:
 - total traces and date range
 - duration stats (mean, median, min, max, total)
+- tokens and estimated cost, broken down by model (traces from before token
+  tracking was added report "no token data" rather than a misleading $0)
 - per-phase duration stats
 - tool usage frequency
 - guard triggers and reasons
@@ -101,6 +103,37 @@ def main():
         print(f"Max:    {format_duration(max(durations))}")
         print(f"Total:  {format_duration(sum(durations))}")
         print()
+
+    token_traces = [t for t in traces if t.get("prompt_tokens") or t.get("completion_tokens")]
+    print("-" * 70)
+    print("TOKENS & COST")
+    print("-" * 70)
+    if token_traces:
+        by_model: dict[str, dict] = {}
+        for t in token_traces:
+            model = t.get("model", "unknown")
+            entry = by_model.setdefault(model, {"prompt": 0, "completion": 0, "cost": 0.0, "priced": 0, "n": 0})
+            entry["n"] += 1
+            entry["prompt"] += t.get("prompt_tokens", 0)
+            entry["completion"] += t.get("completion_tokens", 0)
+            if t.get("estimated_cost_usd") is not None:
+                entry["cost"] += t["estimated_cost_usd"]
+                entry["priced"] += 1
+
+        total_prompt = sum(e["prompt"] for e in by_model.values())
+        total_completion = sum(e["completion"] for e in by_model.values())
+        total_cost = sum(e["cost"] for e in by_model.values())
+        any_priced = any(e["priced"] for e in by_model.values())
+        print(f"  Total prompt tokens:     {total_prompt:,}")
+        print(f"  Total completion tokens: {total_completion:,}")
+        print(f"  Estimated cost:          ${total_cost:.4f}" if any_priced else "  Estimated cost:          $0 (all traces are unpriced/local models)")
+        print()
+        for model, e in sorted(by_model.items()):
+            cost_str = f"${e['cost']:.4f}" if e["priced"] else "free/local"
+            print(f"  {model:20s} n={e['n']:3d}  prompt={e['prompt']:,}  completion={e['completion']:,}  cost={cost_str}")
+    else:
+        print("  No token data in these traces (written before token tracking was added).")
+    print()
 
     phase_durations: dict[str, list[int]] = {}
     for trace in traces:

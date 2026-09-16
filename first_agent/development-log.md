@@ -1279,6 +1279,78 @@ Needed two packages not previously installed in this environment (`openai`, `lan
 
 ---
 
+## Experiment 18: Solidifying — Port Episodic Memory + Pruning to LangGraph/Multi-Agent, Fix a Critic Gap
+
+**Date**: 2026-09-14
+**Location**: `first_agent/langgraph_agent.py`, `first_agent/multi_agent.py`
+**Goal**: Close a real feature-parity gap before starting Phase 9 — episodic memory and short-term pruning existed only in the hand-rolled agent (Experiments 13, 14); the LangGraph and multi-agent implementations never got them.
+
+### What was built
+
+- Added a `verified: bool | None` field to `AgentState`, set by `reflect_node` (LangGraph) and `critic_node` (multi-agent) on a final verdict.
+- `run_agent()` in both `langgraph_agent.py` and `multi_agent.py` now recalls a similar past episode before the first attempt (seeding `reflection_feedback`, same mechanism as the hand-rolled version) and records the outcome after the run, both wrapped defensively.
+- `execute_node` (imported unchanged into `multi_agent.py` from `langgraph_agent.py`) now applies `_maybe_summarize_tool_result` and `_prune_tool_history` before appending to `tool_history` — `multi_agent.py` inherited this for free via the existing Actor-reuse design, no separate change needed there.
+- Verified both mechanisms end-to-end: planting a fake episode by hand and running a paraphrased question through both `langgraph_agent.py` and `multi_agent.py` correctly surfaced the `[Episodic Memory]` hint in both.
+
+### A real gap found by testing, not by reading the code
+
+Running the full regression suite surfaced a genuinely new finding: the multi-agent Critic (Experiment 15's checklist) **approved** a vague-but-true answer — *"Native interrupts are the right primitive for human-in-the-loop"* — to *"why did the first approval attempt fail,"* when the same tool history contained the specific mechanism (the `await_approval` recursion) verbatim. None of Experiment 15's three checklist items (numeric consistency, tool relevance, format match) cover "does this answer actually address a specific why/what/how question when the tool history contains a more specific fact." The checklist's earlier narrowing (to fix Experiment 15's over-skepticism problem) apparently swung far enough to also stop catching this.
+
+**Fix**: added a fourth, narrowly-scoped checklist item — "if the question asks why/what caused/how, and the tool history clearly contains a specific fact that answers it, the answer must include that fact" — with an explicit qualifier ("only flag when a more specific answer was clearly sitting right there") to avoid reintroducing Experiment 15's hallucinated-rejection failure mode, plus one worked example in a different domain (a fictional deploy failure) so the model doesn't just pattern-match the literal question it needs to get right. Verified directly: the real failing case now correctly gets `REVISE`d, and both of Experiment 15's original false-positive regression tests (the `993600` product, the conversational weather answer) still correctly `APPROVE`.
+
+### Two pre-existing flakiness sources confirmed, not introduced today
+
+Regression testing surfaced two separate, already-latent issues, both confirmed via direct repetition to be inherent model/API variance rather than anything from this round's changes:
+- `web_search`'s live DuckDuckGo/Wikipedia results vary run to run (already a documented limitation).
+- Even a simple no-tool-needed question ("What is your name?") can occasionally misfire into an unnecessary tool call with a garbled answer — confirmed 1/3 failure rate on direct repetition, using a checklist item (`tool relevance`) that predates today's changes.
+
+### Stress test results
+
+All three implementations land at 37-38/39 depending on run, with the shortfall from the suite fully attributable to the two flakiness sources above, confirmed by checking failure details on every run rather than trusting the summary number alone.
+
+### Key observations
+
+- Feature parity across multiple implementations of the same agent needs the same discipline as any other change: port, then run the full suite, don't assume the port "obviously works" because the source implementation was already tested.
+- A checklist fix for one failure mode (over-skepticism) can create a blind spot for a different failure mode (under-specificity) — the fix for each needs its own explicit rule and its own worked example, not a general "be more/less strict" adjustment.
+- Reusing `execute_node` unchanged across `langgraph_agent.py` and `multi_agent.py` paid off again here — pruning needed exactly one code change, not two.
+
+---
+
+## Experiment 19: Cost & Token Tracking
+
+**Date**: 2026-09-14
+**Location**: `first_agent/tracer.py`, `first_agent/math_agent.py`, `first_agent/langgraph_agent.py`, `first_agent/multi_agent.py`, `first_agent/trace_analyzer.py`
+**Goal**: Close the gap flagged all the way back in Experiment 9 ("Add cost estimation... when available") — traces have never recorded token usage or cost.
+
+### What was built
+
+- `tracer.py` gained a small module-level token-usage accumulator (`reset_token_usage()` / `record_token_usage()` / `get_token_usage()`) and a hand-maintained `MODEL_PRICING_PER_1M` table (`estimate_cost_usd()` returns `None` for unpriced/local models rather than guessing $0 means "confirmed free"). `Trace.finalize()` now accepts `prompt_tokens`/`completion_tokens` and computes `estimated_cost_usd`; both are written to the trace JSON.
+- Chosen design: an accumulator that `run_agent()` resets at the start and reads at the end, rather than threading token counts through every existing `tracer.add_step()` call site — kept this change purely additive.
+- Each provider exposes usage differently, checked empirically before writing any code:
+  - Ollama's raw client: `response.prompt_eval_count` / `response.eval_count`.
+  - OpenAI's raw client: `response.usage.prompt_tokens` / `.completion_tokens`.
+  - LangChain's wrapper (used in `langgraph_agent.py`, inherited by `multi_agent.py`): normalizes both into `response.usage_metadata['input_tokens']`/`['output_tokens']` — one code path instead of two.
+- `trace_analyzer.py` gained a "TOKENS & COST" section, broken down per model, with traces from before this change correctly reporting "no token data" rather than a misleading `$0`.
+
+### Verified
+
+- Ollama `llama3.1`: tokens captured correctly, cost reports `None` (not `$0` — genuinely unpriced, not "confirmed free" via a fake zero).
+- OpenAI `gpt-4o-mini`: tokens and cost captured correctly across all three implementations; hand-verified the cost math itself (`2568 * 0.15/1e6 + 22 * 0.60/1e6 = $0.0003984`, matched exactly).
+- Full regression suite re-run after wiring this into every `run_agent()`: same two known-flaky failures as Experiment 18, nothing new broken.
+
+### Key observations
+
+- An accumulator reset-at-start/read-at-end pattern is a good fit when you want to add a cross-cutting measurement (tokens, could extend to latency-per-call) without touching every existing call site that already has its own established shape.
+- Checking each provider's actual response object empirically (rather than assuming a consistent shape) mattered — Ollama, raw OpenAI, and LangChain's OpenAI/Ollama wrappers all expose usage differently, and LangChain's normalization saved a second by-hand implementation.
+- Returning `None` for an unpriced model, not `$0`, matters for correctness — trace_analyzer.py's report explicitly says "$0 (all traces are unpriced/local models)" rather than letting a mix of local + hosted runs silently under-report by treating missing prices as free.
+
+### What this enables next
+
+- Real per-question cost data now exists for any future model/provider comparison (Experiment 17 had to estimate cost by hand).
+- The last remaining Path B item: a genuine fix (or a more honest characterization of the limits) for the prompt-injection gap from Experiment 16.
+
+---
+
 ## General Lessons Learned
 
 1. **The loop is more important than the model size.**  
@@ -1315,8 +1387,10 @@ Needed two packages not previously installed in this environment (`openai`, `lan
 - [x] Add a local semantic memory / RAG store (`recall_knowledge`) over the project's own docs.
 - [x] Add episodic memory (store and recall past runs/corrections).
 - [x] Add short-term memory (summarize/prune long tool histories).
-- [ ] Port episodic memory and short-term pruning to the LangGraph agent.
+- [x] Port episodic memory and short-term pruning to the LangGraph agent and the multi-agent team.
 - [x] Build a multi-agent team (Actor + Critic) in LangGraph.
 - [ ] Get the multi-agent team to genuinely outperform the single agent on at least one task (currently at parity; needs real capability separation, not just a different prompt on the same model).
-- [ ] Expand the benchmark script with more edge cases and adversarial prompts.
+- [x] Expand the benchmark script with more edge cases and adversarial prompts.
 - [ ] Add LangGraph persistence/checkpointing across process restarts.
+- [x] Add cost/token tracking to traces and the trace analyzer.
+- [ ] Find a real fix (or a more honest characterization of the limits) for the prompt-injection gap from Experiment 16.
