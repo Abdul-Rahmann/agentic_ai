@@ -56,6 +56,9 @@ The agent uses a **tool loop** followed by **answer synthesis**, **reflection**,
 - `test_episodic_memory.py` — unit-style test proving a mistake recorded in one `run_agent()` call is recalled and corrected in a separate, later call
 - `test_pruning.py` — unit-style test of short-term memory management: summarization threshold, tool-history cap, error passthrough
 - `multi_agent.py` — a third implementation: an Actor + Critic two-agent team in LangGraph (Phase 7)
+- `api.py` — FastAPI service exposing all three implementations over HTTP, with auth, cost budget, and concurrency safety (Phase 9)
+- `requirements.txt` — pinned dependencies; did not exist before Phase 9, which made the project impossible to deploy reproducibly
+- `Dockerfile` — container image, with the embedding model and vector index baked in at build time
 - `trace_analyzer.py` — report generator that reads trace JSON files and summarizes latency, tool usage, guards, and failures
 - `traces/` — directory where JSON trace files are written automatically
 - `development-log.md` — detailed design/evolution history
@@ -450,6 +453,104 @@ Example trace file (`first_agent/traces/2026-...__c7e21dac.json`):
 
 Traces are disabled during stress testing to keep the benchmark clean.
 
+## HTTP service (`api.py`) — Phase 9
+
+A FastAPI wrapper exposing all three implementations over HTTP, with the things a service needs that a CLI doesn't: authentication, a cost budget, and concurrency safety.
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /health` | none | Liveness + config. Unauthenticated on purpose so container healthchecks need no credentials. |
+| `GET /budget` | yes | Spend against the configured budget. |
+| `POST /ask` | yes | Run a question. Body: `{"question": ..., "implementation": "hand_rolled"\|"langgraph"\|"multi_agent"}`. |
+| `GET /docs` | none | Auto-generated interactive Swagger UI — the easiest way to poke at it. |
+
+Configuration is all environment-based: `AGENT_API_KEY` (if unset, auth is **disabled** and it says so loudly at startup), `AGENT_MAX_COST_USD` (default `1.00`), plus the usual `AGENT_MODEL` / `USE_OPENAI`.
+
+Two design details worth knowing:
+- `/ask` is declared `def`, not `async def`, deliberately — `run_agent` is blocking, so FastAPI runs it in a threadpool and other requests keep being served. An `async def` would block the event loop and serialize everything.
+- The budget is **shared, lock-protected** process state (that's the point of a budget), while token tallies are **per-request** `ContextVar` state. Getting that backwards is exactly the bug described in `tracer.py`'s comments.
+
+### Try it yourself
+
+```bash
+cd first_agent
+AGENT_API_KEY=secret python3 -m uvicorn api:app --port 8000
+```
+
+Wait for `Application startup complete` — startup takes ~15-25s because importing torch/langgraph is slow. Curling before then gives a connection error, not a useful message.
+
+Then, in another terminal:
+
+```bash
+curl -s localhost:8000/health | python3 -m json.tool
+
+curl -s -X POST localhost:8000/ask \
+  -H 'Content-Type: application/json' -H 'X-API-Key: secret' \
+  -d '{"question":"What is 15 * 23?"}' | python3 -m json.tool
+
+# Auth rejection — expect 401
+curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8000/ask \
+  -H 'Content-Type: application/json' -d '{"question":"test"}'
+
+curl -s localhost:8000/budget -H 'X-API-Key: secret' | python3 -m json.tool
+```
+
+Or just open <http://localhost:8000/docs> and use the Swagger UI.
+
+**Prove the concurrency is real** (should show wall clock well under the summed time, and each request reporting its *own* token count):
+
+```bash
+python3 -c "
+import asyncio, httpx, time
+QS = ['What is 2 + 2?', 'What is 15 * 23?', 'What is the capital of France?']
+async def ask(c, q):
+    t0 = time.perf_counter()
+    r = await c.post('http://localhost:8000/ask', json={'question': q},
+                     headers={'X-API-Key': 'secret'}, timeout=180)
+    d = r.json()
+    return q, d['prompt_tokens'], time.perf_counter() - t0
+async def main():
+    async with httpx.AsyncClient() as c:
+        t0 = time.perf_counter()
+        rs = await asyncio.gather(*(ask(c, q) for q in QS))
+        wall = time.perf_counter() - t0
+    for q, pt, d in rs: print(f'{d:6.2f}s prompt={pt:5d}  {q}')
+    print(f'wall={wall:.2f}s  summed={sum(r[2] for r in rs):.2f}s')
+asyncio.run(main())
+"
+```
+
+**Test the cost guard** (needs a priced model, so OpenAI + a deliberately tiny budget):
+
+```bash
+AGENT_API_KEY=secret USE_OPENAI=1 AGENT_MODEL=gpt-4o-mini AGENT_MAX_COST_USD=0.0005 \
+  python3 -m uvicorn api:app --port 8000
+# then send the same /ask request 3x — the third returns HTTP 402
+```
+
+### Docker
+
+```bash
+# Build from the REPO ROOT (the knowledge-base docs must be in context)
+docker build -f first_agent/Dockerfile -t agentic-ai .
+
+# Run against Ollama on the host (Docker Desktop)
+docker run --rm -p 8000:8000 \
+  -e AGENT_API_KEY=secret \
+  -e OLLAMA_HOST=http://host.docker.internal:11434 agentic-ai
+
+# Or against OpenAI (no host dependency)
+docker run --rm -p 8000:8000 \
+  -e AGENT_API_KEY=secret -e USE_OPENAI=1 -e AGENT_MODEL=gpt-4o-mini \
+  -e OPENAI_API_KEY=sk-... agentic-ai
+```
+
+Honest notes on the container:
+- **The image is ~6.5GB.** `sentence-transformers` pulls in torch, which dominates. Dropping the RAG dependencies would shrink it enormously — a real trade-off, flagged in `requirements.txt`.
+- Requests run roughly **2-5x slower** in the container than on the host (constrained CPU plus a network hop back to host Ollama).
+- Ollama itself runs on the **host**, not in the image — the model is several GB and doesn't belong in a service container. `host.docker.internal` is the Docker Desktop route to it; on plain Linux use `--network=host` instead.
+- The vector index is built at **image-build time**, not on first request, so no unlucky request pays for it.
+
 ## Cost & token tracking
 
 Every trace also records `prompt_tokens`, `completion_tokens`, and `estimated_cost_usd`. Ollama (`llama3.1`, local) always reports `estimated_cost_usd: null` — genuinely unpriced, not a fake `$0` — since there's no meaningful price for a local model. OpenAI models get a real estimate from a small hand-maintained pricing table in `tracer.py` (`MODEL_PRICING_PER_1M`) — verify against OpenAI's current pricing page before trusting it for anything beyond a rough estimate; it does not auto-update.
@@ -507,6 +608,12 @@ python first_agent/trace_analyzer.py --last 2
 30. A checklist fix for one failure mode (a critic being too skeptical) can create a blind spot for a different failure mode (not skeptical enough) — each needs its own narrow rule and its own worked example, not a general strictness dial in either direction.
 31. Different LLM provider clients expose token usage differently (Ollama: `prompt_eval_count`/`eval_count`; raw OpenAI: `usage.prompt_tokens`/`.completion_tokens`; LangChain's wrapper: a normalized `usage_metadata` dict) — worth checking each empirically before writing tracking code, rather than assuming one shape fits all.
 32. Reporting `None`/"no data" instead of a fake `$0` or "0%" matters for correctness whenever a metric can be genuinely unavailable, not just zero — otherwise a mix of measured and unmeasured data silently under-reports.
+33. When a model keeps failing to do X *and* Y in one prompt, giving X its own dedicated call is worth trying before another wording iteration. Three rounds of prompt-tuning never got injection resistance past "sometimes"; a single-purpose sanitizer pass hit 10/10 on the first real attempt.
+34. Don't trust an LLM to honor a "reproduce this exactly" contract. The sanitizer broke it two different ways, including answering a meta question *about* the text instead of returning it. Where the failure is detectable in code (output shape, length), a deterministic guard beats more prompting.
+35. A passing test proves nothing until you've seen it fail. After fixing the concurrency bug, re-creating the *old* implementation and confirming it actually fails the same test is what made the fix trustworthy.
+36. Shipping surfaces design flaws that single-user testing cannot. A process-global token accumulator was correct for every sequential CLI run it ever served and silently wrong for the first concurrent request. "Works today" and "works under the access pattern you're about to introduce" are different claims.
+37. Comparing two different workloads and attributing the difference to one variable is an invalid inference. A "cold start costs 60s" conclusion came from comparing two *different* questions; the controlled same-question test showed the real answer was completely different.
+38. "It builds" is not "it works." The container needed a route to host Ollama, a baked-in embedding model, and the knowledge-base docs copied in — each a silent *runtime* failure, not a build failure.
 
 ## Next steps
 
@@ -527,6 +634,10 @@ python first_agent/trace_analyzer.py --last 2
 15. Make tools configurable and add budget-aware routing (e.g., prefer free/local tools over paid APIs).
 16. Add LangGraph persistence/checkpointing so a run can be paused and resumed across process restarts.
 17. ~~Add adversarial/edge-case questions (Phase 8).~~ Done: path traversal, division by zero, and a large factorial pass; a prompt-injection probe is tracked as informational, not scored — it's genuinely unreliable, not yet solved.
-18. Find a real fix for the prompt-injection gap — likely needs more than prompt engineering (a classifier pass on tool output, or structural message-role isolation), not just more wording iteration.
+18. ~~Find a real fix for the prompt-injection gap.~~ Done: a dedicated sanitizer pass — 10/10 where prompt-wording had flip-flopped. See `development-log.md` Experiment 20.
 19. ~~Compare at least two models/providers.~~ Done: `llama3.1` vs `gpt-4o-mini` on the identical suite — see `development-log.md` Experiment 17. Phase 8 fully checked off.
 20. ~~Add cost/token tracking.~~ Done: `tracer.py` + `trace_analyzer.py`, verified against both providers — see the Cost & token tracking section above.
+21. ~~Ship it as a service (Phase 9): API, auth, cost guards, concurrency, container.~~ Done: `api.py` + `Dockerfile` — see the HTTP service section above.
+22. Actually deploy to a remote host and add real monitoring/alerting — the one Phase 9 box still honestly unchecked.
+23. Persist the cost budget across restarts (it's in-process today, so a restart resets spend to zero — fine locally, wrong for anything real).
+24. Return the `trace_id` in the `/ask` response so a caller can correlate a response with its trace file. Skipped for now because it means changing `run_agent`'s return shape across all three implementations.

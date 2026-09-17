@@ -6,6 +6,7 @@ steps, tool calls, results, timings, and final answer. This makes failures
 debuggable and allows performance and reliability analysis.
 """
 
+import contextvars
 import json
 import os
 import time
@@ -38,25 +39,37 @@ def estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) ->
 #
 # The chat() / _chat() helpers in each agent implementation record usage
 # here after every LLM call; run_agent() resets this at the start of a run
-# and reads the total at the end. A module-level accumulator (rather than
-# threading token counts through every existing tracer.add_step() call)
-# keeps this additive: no existing call site needs to change shape.
+# and reads the total at the end. An accumulator (rather than threading
+# token counts through every existing tracer.add_step() call) keeps this
+# additive: no existing call site needed to change shape.
+#
+# This uses a ContextVar, NOT a plain module global. The first version was
+# a plain global, which worked fine for sequential CLI runs but is broken
+# the moment two runs overlap: request B's reset_token_usage() would wipe
+# request A's in-flight tally, and their record_token_usage() calls would
+# interleave into one shared bucket. A ContextVar gives each thread/async
+# task its own value (Starlette copies the context into its threadpool
+# workers), so concurrent API requests can't corrupt each other's counts.
 
-_token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+_token_usage: contextvars.ContextVar[dict] = contextvars.ContextVar("token_usage")
 
 
 def reset_token_usage() -> None:
-    global _token_usage
-    _token_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    _token_usage.set({"prompt_tokens": 0, "completion_tokens": 0})
 
 
 def record_token_usage(prompt_tokens: int, completion_tokens: int) -> None:
-    _token_usage["prompt_tokens"] += prompt_tokens
-    _token_usage["completion_tokens"] += completion_tokens
+    usage = _token_usage.get(None)
+    if usage is None:
+        usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        _token_usage.set(usage)
+    usage["prompt_tokens"] += prompt_tokens
+    usage["completion_tokens"] += completion_tokens
 
 
 def get_token_usage() -> dict:
-    return dict(_token_usage)
+    usage = _token_usage.get(None)
+    return dict(usage) if usage else {"prompt_tokens": 0, "completion_tokens": 0}
 
 
 class Trace:

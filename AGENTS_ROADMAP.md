@@ -551,10 +551,10 @@ Use this checklist to track mastery.
 - [x] Compared at least two models or providers. (`llama3.1` vs `gpt-4o-mini` on the identical 39-question suite — `gpt-4o-mini` ~2x faster, 38/39 vs 39/39, with two nuanced findings that don't reduce to "which one wins." See development-log.md Experiment 17.)
 
 ### Phase 9 — Production
-- [ ] Agent exposed via API or CLI.
-- [ ] Handles concurrent requests.
-- [ ] Has authentication and cost guards.
-- [ ] Deployed and monitored.
+- [x] Agent exposed via API or CLI. (`api.py` — FastAPI service over all three implementations, plus the pre-existing CLIs.)
+- [x] Handles concurrent requests. (Measured: 3 concurrent requests in 5.42s wall vs 14.24s summed. Required fixing a real concurrency bug — the token accumulator was process-global and would have corrupted per-request tallies; now a ContextVar.)
+- [x] Has authentication and cost guards. (`X-API-Key` with `compare_digest`; a shared, lock-protected spend budget returning 402 when exhausted. Both tested, including rejection paths.)
+- [ ] Deployed and monitored. (Containerized and verified running — image builds, container answers real questions against host Ollama, `/health` + Docker HEALTHCHECK work. Not deployed to any remote host, and no real monitoring/alerting stack beyond the health endpoint and JSON traces.)
 
 ---
 

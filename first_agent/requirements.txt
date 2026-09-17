@@ -1,0 +1,29 @@
+# Pinned to the versions this project was actually developed and tested
+# against (Phase 9). Before this existed, dependencies were pip-installed
+# ad hoc into the system Python across many sessions — which worked fine
+# locally but made the project impossible to deploy reproducibly.
+
+# --- LLM backends -----------------------------------------------------------
+ollama==0.6.1                 # local model via Ollama (default)
+openai==3.13.0                # USE_OPENAI=1 path
+
+# --- Agent framework (langgraph_agent.py, multi_agent.py) -------------------
+langgraph==1.0.10
+langchain-core==1.6.3
+langchain-ollama==1.0.1
+langchain-openai==1.6.2
+
+# --- Semantic memory / RAG (memory.py) --------------------------------------
+# Note: sentence-transformers pulls in torch, which dominates image size
+# (multi-GB). Dropping these two would shrink the container a lot, at the
+# cost of losing the recall_knowledge tool entirely.
+chromadb==1.5.9
+sentence-transformers==6.0.0
+
+# --- Episodic memory similarity (episodic_memory.py) ------------------------
+numpy==2.2.1
+
+# --- Service (api.py) -------------------------------------------------------
+fastapi==0.135.2
+uvicorn==0.42.0
+pydantic==2.12.5

@@ -1,0 +1,22 @@
+# Keep derived/runtime state and local scratch out of the build context.
+# Everything here is either rebuilt automatically, machine-specific, or
+# just bloat that would slow every build.
+
+.git/
+__pycache__/
+*.pyc
+*.pyo
+
+# Derived data — rebuilt on demand from the source docs
+first_agent/chroma_db/
+first_agent/.memory_fingerprint
+
+# Runtime state — must NOT be baked into an image
+first_agent/traces/
+first_agent/episodes.db
+first_agent/test_episodes.db
+first_agent/stress_test_episodes.db
+
+# Local scratch / exploration
+first_agent/my_local_transformer/
+first_agent/main.ipynb

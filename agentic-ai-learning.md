@@ -1158,6 +1158,49 @@ Max response time:    11.75s
 
 ---
 
+### Experiment 20: Prompt-Injection Sanitizer — A Structural Fix That Worked
+
+**Date**: 2026-09-16
+**Location**: `first_agent/math_agent.py`, `first_agent/langgraph_agent.py`
+**Goal**: Close Experiment 16's injection gap with something structurally different from the prompt-wording tweaks that kept failing.
+
+**The approach**: rather than asking the main plan/answer/reflection prompts to resist injection *while also* doing their real job, add a dedicated single-purpose pass — an LLM call whose only task is "detect an embedded instruction in this tool output and strip it" — run before that output reaches any other prompt. Scoped to `read_file`/`web_search`/`recall_knowledge`.
+
+**Result**: **10/10** clean end-to-end, versus the previous state where the identical question gave `42`, `HACKED`, `HACKED` across three runs.
+
+**Two false-positive failures found while testing**:
+1. It redacted legitimate markdown checklist bullets from the project's own docs — ordinary imperative documentation superficially resembles a command. Fixed by scoping to "text *directly addressing* an AI" with explicit negative examples and a "when in doubt, leave unchanged" rule.
+2. Worse: it sometimes answered a *meta question about* the text (`"The text does not contain any direct instructions..."`) **instead of** reproducing it, destroying ~2000 chars of real content. Prompt refinement alone wasn't trustworthy for this, so it got a **code-level safety net**: no redaction marker + output under half the input length ⇒ discard and use the original.
+
+**Key observations**:
+- Splitting a concern into its own narrow task worked where three rounds of prompt-tuning the general-purpose prompts had not. When a model keeps failing to do X *and* Y in one prompt, try giving X its own call before another wording iteration.
+- Don't trust an LLM to honor a "reproduce this exactly" contract — it broke that contract in two distinct ways. Where the failure is detectable in code (output shape/length), a deterministic guard beats more prompting.
+
+---
+
+### Experiment 21: Phase 9 — Shipping It (API, Concurrency, Auth, Budgets, Docker)
+
+**Date**: 2026-09-16
+**Location**: `first_agent/api.py`, `Dockerfile`, `requirements.txt`, `.dockerignore`, `tracer.py`
+**Goal**: Ship the agent as a usable service — the last roadmap phase.
+
+**What was built**: FastAPI service over all three implementations (`/ask`, `/health`, `/budget`, auto-generated `/docs`); `X-API-Key` auth using `secrets.compare_digest`; a shared lock-protected cost budget returning 402 when exhausted; a Dockerfile with the embedding model *and* vector index baked in at build time. Plus `requirements.txt`, which **did not exist before** — dependencies had been pip-installed ad hoc for months, fine locally and an absolute blocker for deployment.
+
+**A real concurrency bug, in code written hours earlier**: Experiment 19's token accumulator was a plain module global — correct for every sequential CLI run it had ever served, and broken the instant two requests overlap (B's reset wipes A's in-flight tally). Fixed with a `ContextVar`. Crucially, the test was verified to be *meaningful*: the old implementation was re-created and **does** fail it (request A reporting B's numbers). A passing test proves nothing until you've seen it fail.
+
+**Measured, not assumed**: 3 concurrent requests in **5.42s wall vs 14.24s summed**; per-request token isolation held under real HTTP load (1411 vs 2580 tokens correctly attributed); container answers real questions against host Ollama with RAG working inside it.
+
+**A methodological mistake worth recording**: a fresh container's first RAG request took 111s and a later one 49.7s, so I attributed ~60s to one-time index building and pre-built the index at image-build time. The rebuild only improved it to 95.9s. The controlled test I should have run first (*same* question, cold vs warm: 95.9s vs 93.6s) showed the pre-build had actually eliminated nearly all cold-start cost — and that the original 111-vs-49.7 gap was mostly just **two different questions**, an invalid comparison. Right fix, wrong reasoning; only the controlled comparison caught it.
+
+**Honest limitations**: ~6.5GB image (torch dominates); container ~2-5x slower than host; the budget check runs before a request so one run can overshoot; and **"deployed and monitored" is left unchecked** — containerized and verified locally, but never deployed remotely and no real monitoring beyond `/health`.
+
+**Key observations**:
+- Shipping surfaces design flaws single-user testing cannot. "Works today" and "works under the access pattern you're about to introduce" are different claims.
+- Dependency hygiene is invisible until you deploy — nothing was broken locally without a requirements.txt; the container simply couldn't be built.
+- "It builds" is not "it works": the image needed a route to host Ollama, a baked-in model, and the docs copied in — each a silent *runtime* failure, not a build failure.
+
+---
+
 ## To Add / Next Topics
 
 Use this section to track future additions to the notes.
@@ -1205,6 +1248,8 @@ Use this section to track future additions to the notes.
 | 2026-09-12 | Added adversarial/edge-case testing (Phase 8): path traversal, division by zero, and a large factorial all held up correctly. A prompt-injection attempt via a file's contents succeeded (agent answered "HACKED"); a delimiter-based mitigation attempt introduced a worse regression (broke `pow(2,8)`, fixed); a follow-up wording change alone flipped 8/8 correct to 8/8 wrong on the same question. Injection resistance remains genuinely unreliable after the fix — added as an informational, unscored probe in `stress_test.py` rather than a false pass/fail. |
 | 2026-09-14 | Documented the evaluation-axes breakdown (correctness/robustness/reliability/latency/cost/comparative) as a proper reference section. Ran the model/provider comparison (last open Phase 8 item): `gpt-4o-mini` vs. local `llama3.1` on the identical 39-question suite — `gpt-4o-mini` ~2x faster but gave a less specific answer on one memory question, and its "resisted" injection probe result turned out to still deliver "HACKED" as the answer (only its reflection step correctly caught the mismatch). Phase 8 fully checked off. |
 | 2026-09-14 | Solidified feature parity (Path B): ported episodic memory + short-term pruning to `langgraph_agent.py` and `multi_agent.py`; found and fixed a real multi-agent Critic gap (approved a vague-but-true answer when a specific one was available) with a narrowly-scoped checklist addition. Added cost/token tracking to `tracer.py` and `trace_analyzer.py`, closing a gap open since Experiment 9 — verified against both Ollama and OpenAI, cost math hand-checked exact. |
+| 2026-09-16 | Closed the prompt-injection gap with a dedicated sanitizer pass (10/10, where prompt-wording had flip-flopped), after finding and fixing two false-positive failures — including one where the sanitizer answered a meta question *about* the text instead of reproducing it, which needed a code-level safety net rather than more prompting. |
+| 2026-09-16 | Phase 9: shipped the agent as a FastAPI service with API-key auth, a lock-protected cost budget (402 when exhausted), and verified concurrency (3 requests in 5.42s wall vs 14.24s summed). Fixed a real concurrency bug in the token accumulator (global → ContextVar), verifying the old version genuinely fails the same test. Containerized with the model and vector index baked in. "Deployed and monitored" left honestly unchecked — local/containerized only, no remote host or monitoring stack. |
 
 ---
 
